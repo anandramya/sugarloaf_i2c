@@ -1661,7 +1661,9 @@ def main():
         epilog="""
 Usage Formats:
   ./powertool.py [RAIL] [COMMAND] [OPTIONS]      # Standard command execution
-  ./powertool.py page [0/1] [ADDRESS|COMMAND] READ [1/2] # Direct register read
+  ./powertool.py [RAIL] READ [HEX_ADDR] [BYTES]  # Direct hex register read
+  ./powertool.py [RAIL] WRITE [HEX_ADDR] [VALUE] [BYTES] # Direct hex register write (BYTES: 1 or 2)
+  ./powertool.py page [0/1] [ADDRESS|COMMAND] READ [1/2] # Legacy register read
   ./powertool.py log                             # Continuous logging mode
   ./powertool.py test                            # Run readback test
 
@@ -1677,7 +1679,15 @@ Examples:
     ./powertool.py TSP_C2C READ_IOUT log           # Continuously log current to CSV
     ./powertool.py log                             # Log all rails continuously
 
-  Direct Register Access:
+  Direct Hex Register Access (New):
+    ./powertool.py TSP_CORE READ 0x21              # Read VOUT_COMMAND (2 bytes default)
+    ./powertool.py TSP_CORE READ 0x8B              # Read READ_VOUT register
+    ./powertool.py TSP_CORE READ 0x20 1            # Read VOUT_MODE (1 byte)
+    ./powertool.py TSP_C2C READ 0x79               # Read STATUS_WORD from page 1
+    ./powertool.py TSP_CORE WRITE 0x21 0x0C00     # Write to VOUT_COMMAND with verification
+    ./powertool.py TSP_CORE WRITE 0x03 0x00       # Clear faults (CLEAR_FAULTS)
+
+  Legacy Direct Register Access:
     ./powertool.py page 0 READ_VOUT READ 2         # Single read using English name
     ./powertool.py page 0 READ_VOUT LOG 2          # Continuous log using English name
     ./powertool.py page 1 STATUS_WORD LOG 2        # Log status word on page 1
@@ -1760,7 +1770,7 @@ Note: Add "log" as third argument to continuously log any command to CSV file
             print(f"Error reading hex address: {e}")
             sys.exit(1)
 
-    # Handle rail-based hex address write: TSP_CORE WRITE 0x21 0x1234
+    # Handle rail-based hex address write: TSP_CORE WRITE 0x21 0x1234 [1|2]
     if args.rail and args.rail.upper() in ['TSP_CORE', 'TSP_C2C'] and args.command and args.command.upper() == 'WRITE' and args.log_mode and args.extra_arg:
         try:
             # Map rail to page
@@ -1782,8 +1792,13 @@ Note: Add "log" as third argument to continuously log any command to CSV file
             else:
                 write_value = int(args.extra_arg, 16)
 
-            # Determine byte count based on value size
-            byte_count = 1 if write_value <= 0xFF else 2
+            # Use explicit byte count if provided, otherwise auto-detect from value size
+            if args.byte_count:
+                byte_count = int(args.byte_count)
+                if byte_count not in [1, 2]:
+                    raise ValueError("Byte count must be 1 or 2")
+            else:
+                byte_count = 1 if write_value <= 0xFF else 2
 
             print(f"Writing to {args.rail} (Page {page}), Address 0x{hex_addr:02X}")
             print(f"Value: 0x{write_value:0{byte_count*2}X} (decimal: {write_value}, {byte_count} byte(s))")
@@ -1797,7 +1812,7 @@ Note: Add "log" as third argument to continuously log any command to CSV file
 
             # Write data
             if byte_count == 1:
-                powertool.i2c_write8PMBus(page, hex_addr, write_value)
+                powertool.i2c_write8PMBus(hex_addr, write_value)
                 print(f"✓ Written byte value 0x{write_value:02X} to address 0x{hex_addr:02X}")
             else:
                 powertool.i2c_write16PMBus(page, hex_addr, write_value)

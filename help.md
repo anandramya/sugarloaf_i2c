@@ -51,8 +51,13 @@ Read/write any PMBus register directly by hex address with simplified syntax:
 ./powertool.py TSP_C2C READ 0x78 1     # Read STATUS_BYTE (1 byte)
 
 # Direct hex register writes (with verification)
-./powertool.py TSP_CORE WRITE 0x21 0x0800    # Write to VOUT_COMMAND
-./powertool.py TSP_C2C WRITE 0x03 0x00       # Clear faults on page 1
+./powertool.py TSP_CORE WRITE 0x21 0x0800    # Write to VOUT_COMMAND (auto-detects 2 bytes)
+./powertool.py TSP_C2C WRITE 0x03 0x00       # Clear faults on page 1 (auto-detects 1 byte)
+
+# Force specific byte width for writes
+./powertool.py TSP_CORE WRITE 0x21 0x0800 2  # Force 2-byte write (16-bit PMBus)
+./powertool.py TSP_CORE WRITE 0x62 0x0F 1    # Force 1-byte write (8-bit PMBus)
+./powertool.py TSP_CORE WRITE 0x62 0xFF 2    # Force 2-byte write for small value
 
 # Multiple hex formats supported
 ./powertool.py TSP_CORE READ 0x8B      # Standard hex (0x prefix)
@@ -90,6 +95,31 @@ Write a PMBus register:
 # Clear faults
 ./powertool.py TSP_CORE CLEAR_FAULTS
 ./powertool.py TSP_C2C CLEAR_FAULTS
+
+# Direct hex register writes with byte width control
+./powertool.py TSP_CORE WRITE 0x21 0x0800     # Auto-detects byte width (2 bytes)
+./powertool.py TSP_CORE WRITE 0x21 0x0800 2   # Force 2-byte write (16-bit PMBus)
+./powertool.py TSP_CORE WRITE 0x20 0x16 1     # Force 1-byte write (8-bit PMBus)
+./powertool.py TSP_CORE WRITE 0x62 0xFF 2     # Force 2-byte write for small values
+```
+
+### Byte Width Control for Writes
+
+The tool supports explicit byte width specification for write operations:
+
+- **1 byte**: Uses 8-bit PMBus write function (`i2c_write8PMBus`)
+- **2 bytes**: Uses 16-bit PMBus write function (`i2c_write16PMBus`)
+- **Auto-detect**: Automatically selects based on value size (≤ 0xFF = 1 byte, > 0xFF = 2 bytes)
+
+```bash
+# Examples of byte width control
+./powertool.py TSP_CORE WRITE 0x20 0x16 1     # VOUT_MODE (must be 1 byte)
+./powertool.py TSP_CORE WRITE 0x21 0x0C00 2   # VOUT_COMMAND (must be 2 bytes)
+./powertool.py TSP_CORE WRITE 0x78 0x00 1     # STATUS_BYTE (1 byte register)
+./powertool.py TSP_CORE WRITE 0x79 0x0000 2   # STATUS_WORD (2 byte register)
+
+# Force larger width for small values when needed
+./powertool.py TSP_CORE WRITE 0x21 0x10 2     # Write 0x0010 instead of 0x10
 ```
 
 ### Monitor
@@ -208,8 +238,10 @@ Supported rails:
 ./powertool.py TSP_CORE READ 0x20 1    # Check voltage mode
 
 # Write operations (with verification)
-./powertool.py TSP_CORE WRITE 0x21 0x0C00  # Set voltage to ~0.75V
-./powertool.py TSP_CORE WRITE 0x03 0x00    # Clear all faults
+./powertool.py TSP_CORE WRITE 0x21 0x0C00     # Set voltage to ~0.75V (auto-detects 2 bytes)
+./powertool.py TSP_CORE WRITE 0x03 0x00       # Clear all faults (auto-detects 1 byte)
+./powertool.py TSP_CORE WRITE 0x21 0x0C00 2   # Force 2-byte write using 16-bit PMBus
+./powertool.py TSP_CORE WRITE 0x20 0x16 1     # Force 1-byte write using 8-bit PMBus
 
 # Both rails comparison
 ./powertool.py TSP_CORE READ 0x21      # TSP_CORE setpoint
