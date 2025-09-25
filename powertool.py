@@ -1714,6 +1714,117 @@ Note: Add "log" as third argument to continuously log any command to CSV file
     # Parse arguments
     args = parser.parse_args()
 
+    # Handle rail-based hex address read: TSP_CORE READ 0x21
+    if args.rail and args.rail.upper() in ['TSP_CORE', 'TSP_C2C'] and args.command and args.command.upper() == 'READ' and args.log_mode:
+        try:
+            # Map rail to page
+            page = 0 if args.rail.upper() == 'TSP_CORE' else 1
+
+            # Parse hex address
+            if args.log_mode.lower().startswith('0x'):
+                hex_addr = int(args.log_mode, 16)
+            elif args.log_mode.lower().endswith('h'):
+                hex_addr = int(args.log_mode[:-1], 16)
+            else:
+                hex_addr = int(args.log_mode, 16)
+
+            # Default to 2 bytes, or use extra_arg if specified
+            byte_count = 2
+            if args.extra_arg and args.extra_arg in ['1', '2']:
+                byte_count = int(args.extra_arg)
+
+            print(f"Reading from {args.rail} (Page {page}), Address 0x{hex_addr:02X}, {byte_count} byte(s)")
+            print("="*50)
+
+            # Initialize I2C
+            powertool = PowerToolI2C()
+
+            # Set page
+            powertool.i2c_write8PMBus(PMBusDict["PAGE"], page)
+
+            # Read data
+            if byte_count == 1:
+                data = powertool.i2c_read8PMBus(page, hex_addr)
+                print(f"Raw value (byte): 0x{data:02X} (decimal: {data})")
+                print(f"Binary: {bin(data)[2:].zfill(8)}")
+            else:
+                data = powertool.i2c_read16PMBus(page, hex_addr)
+                print(f"Raw value (word): 0x{data:04X} (decimal: {data})")
+                print(f"Binary: {bin(data)[2:].zfill(16)}")
+                print(f"Low byte: 0x{data & 0xFF:02X}")
+                print(f"High byte: 0x{(data >> 8) & 0xFF:02X}")
+
+            sys.exit(0)
+
+        except Exception as e:
+            print(f"Error reading hex address: {e}")
+            sys.exit(1)
+
+    # Handle rail-based hex address write: TSP_CORE WRITE 0x21 0x1234
+    if args.rail and args.rail.upper() in ['TSP_CORE', 'TSP_C2C'] and args.command and args.command.upper() == 'WRITE' and args.log_mode and args.extra_arg:
+        try:
+            # Map rail to page
+            page = 0 if args.rail.upper() == 'TSP_CORE' else 1
+
+            # Parse hex address
+            if args.log_mode.lower().startswith('0x'):
+                hex_addr = int(args.log_mode, 16)
+            elif args.log_mode.lower().endswith('h'):
+                hex_addr = int(args.log_mode[:-1], 16)
+            else:
+                hex_addr = int(args.log_mode, 16)
+
+            # Parse hex value to write
+            if args.extra_arg.lower().startswith('0x'):
+                write_value = int(args.extra_arg, 16)
+            elif args.extra_arg.lower().endswith('h'):
+                write_value = int(args.extra_arg[:-1], 16)
+            else:
+                write_value = int(args.extra_arg, 16)
+
+            # Determine byte count based on value size
+            byte_count = 1 if write_value <= 0xFF else 2
+
+            print(f"Writing to {args.rail} (Page {page}), Address 0x{hex_addr:02X}")
+            print(f"Value: 0x{write_value:0{byte_count*2}X} (decimal: {write_value}, {byte_count} byte(s))")
+            print("="*50)
+
+            # Initialize I2C
+            powertool = PowerToolI2C()
+
+            # Set page
+            powertool.i2c_write8PMBus(PMBusDict["PAGE"], page)
+
+            # Write data
+            if byte_count == 1:
+                powertool.i2c_write8PMBus(page, hex_addr, write_value)
+                print(f"✓ Written byte value 0x{write_value:02X} to address 0x{hex_addr:02X}")
+            else:
+                powertool.i2c_write16PMBus(page, hex_addr, write_value)
+                print(f"✓ Written word value 0x{write_value:04X} to address 0x{hex_addr:02X}")
+
+            # Read back to verify
+            if byte_count == 1:
+                readback = powertool.i2c_read8PMBus(page, hex_addr)
+                print(f"Readback verification: 0x{readback:02X}")
+                if readback == write_value:
+                    print("✓ Write verified successfully")
+                else:
+                    print("⚠ Write verification failed!")
+            else:
+                readback = powertool.i2c_read16PMBus(page, hex_addr)
+                print(f"Readback verification: 0x{readback:04X}")
+                if readback == write_value:
+                    print("✓ Write verified successfully")
+                else:
+                    print("⚠ Write verification failed!")
+
+            sys.exit(0)
+
+        except Exception as e:
+            print(f"Error writing hex address: {e}")
+            sys.exit(1)
+
     # Handle hex address read/log mode: page [0/1] 0xXX [READ|LOG] [1/2]
     if args.rail and args.rail.lower() == "page" and args.command is not None and args.log_mode and args.extra_arg:
         try:
