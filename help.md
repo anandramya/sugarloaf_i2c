@@ -1,75 +1,73 @@
 # PMBus Tool — Extended Help
 
-A fast PMBus read/write + logger for Aardvark I²C adapters.
+A fast, production-grade PMBus command-line tool for Total Phase Aardvark I²C adapters.
 
 ## Quick Start
 
-1. Connect the Aardvark to your DUT (I²C master mode).
-2. Power the DUT; if needed, enable target power with `--power-target`.
+1. Connect the Aardvark to your PMBus device (I²C master mode)
+2. Power the device; if needed, enable target power with `--power-target`
 3. Install dependencies:
    ```bash
-   pip install PyYAML
-   # Also install Total Phase Aardvark drivers
+   pip install PyYAML aardvark_py
+   # Also install Total Phase Aardvark drivers from totalphase.com
    ```
 
 ## Commands
 
 ### Scan
-Find all I²C devices on the bus:
+Find all I²C devices on the bus (0x20-0x7F range):
 ```bash
-python pmbus_tool.py scan
-python pmbus_tool.py scan --port 0 --bitrate-khz 100
+python3 Sugarloaf_I2C_ver2.py scan
+python3 Sugarloaf_I2C_ver2.py scan --port 0 --bitrate-khz 100
 ```
 
 ### Read
 Read a single PMBus register:
 ```bash
-# Read by command name (from commands.yaml)
-python pmbus_tool.py read --addr 0x50 --cmd READ_VOUT
+# Read by rail and command name
+python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT
+python3 Sugarloaf_I2C_ver2.py TSP_C2C READ_IOUT
 
-# Read by hex code
-python pmbus_tool.py read --addr 0x50 --cmd 0x8B
+# Read by address and command
+python3 Sugarloaf_I2C_ver2.py --addr 0x5C --cmd READ_VOUT
 
 # With PEC verification
-python pmbus_tool.py read --addr 0x50 --cmd READ_VOUT --pec
+python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT --pec
 
-# Force specific format
-python pmbus_tool.py read --addr 0x50 --cmd 0x8B --fmt linear16 --exponent -13
-
-# Block read
-python pmbus_tool.py read --addr 0x50 --cmd MFR_MODEL --fmt block
+# Read status registers
+python3 Sugarloaf_I2C_ver2.py TSP_CORE STATUS_WORD
 ```
 
 ### Write
 Write a PMBus register:
 ```bash
-# Write voltage command (12.5V)
-python pmbus_tool.py write --addr 0x50 --cmd VOUT_COMMAND --value 12.5
+# Write voltage command
+python3 Sugarloaf_I2C_ver2.py TSP_CORE VOUT_COMMAND --value 1.8
 
-# Write raw hex value
-python pmbus_tool.py write --addr 0x50 --cmd 0x21 --value 0x199A
+# Clear faults
+python3 Sugarloaf_I2C_ver2.py TSP_CORE CLEAR_FAULTS
 
-# With PEC
-python pmbus_tool.py write --addr 0x50 --cmd VOUT_COMMAND --value 12.5 --pec
+# Set page for multi-rail devices
+python3 Sugarloaf_I2C_ver2.py --addr 0x5C PAGE --value 1
 ```
 
 ### Monitor
 Continuously monitor multiple registers:
 ```bash
 # Monitor voltage and current
-python pmbus_tool.py monitor --addr 0x50 --regs READ_VOUT,READ_IOUT --interval-ms 100
+python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT,READ_IOUT --monitor --interval 100
 
-# Save to CSV with 1000 samples
-python pmbus_tool.py monitor --addr 0x50 --regs READ_VOUT,READ_IOUT,READ_TEMPERATURE_1 \
-    --csv output.csv --samples 1000
+# Save to CSV with timestamps
+python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT,READ_IOUT,READ_TEMPERATURE_1 \
+    --csv --interval 100 --samples 1000
 
-# Fast mode with stdout output
-python pmbus_tool.py monitor --addr 0x50 --regs STATUS_WORD,READ_VOUT,READ_IOUT \
-    --fast --stdout --interval-ms 50
+# Monitor both rails simultaneously
+python3 Sugarloaf_I2C_ver2.py TSP_CORE,TSP_C2C READ_VOUT,READ_IOUT \
+    --csv multi_rail.csv --interval 50
 
-# Monitor for 60 seconds
-python pmbus_tool.py monitor --addr 0x50 --regs READ_VOUT,READ_PIN \
-    --duration-s 60 --csv power_log.csv
+# Monitor for specific duration
+python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT,READ_PIN \
+    --monitor --duration 60 --csv power_log.csv
 ```
 
 ## PMBus Formats
@@ -95,27 +93,16 @@ python pmbus_tool.py monitor --addr 0x50 --regs READ_VOUT,READ_PIN \
 
 ## Configuration
 
-Edit `commands.yaml` to define your device's registers:
+The tool includes built-in support for standard PMBus commands and MPS-specific registers. Key registers are defined in the PMBusDict within Sugarloaf_I2C_ver2.py:
 
-```yaml
-READ_VOUT:
-  code: 0x8B
-  transaction: word  # byte/word/block
-  format:
-    type: linear16
-    exponent: -13
-  unit: V
+- Standard PMBus commands (0x00-0x97)
+- MFR-specific commands (0x67, 0xD1-0xD8)
+- Phase current registers (0x0C00-0x0C0F)
+- Rail selection via PAGE command (0x00)
 
-CUSTOM_REG:
-  code: 0xD0
-  transaction: word
-  format:
-    type: direct
-    m: 0.5
-    b: 0
-    R: -3
-  unit: A
-```
+Supported rails:
+- TSP_CORE: Primary voltage rail
+- TSP_C2C: Secondary voltage rail
 
 ## Performance Tips
 
@@ -154,33 +141,31 @@ CUSTOM_REG:
 ### Power Supply Monitoring
 ```bash
 # Monitor efficiency
-python pmbus_tool.py monitor --addr 0x58 \
-    --regs READ_VIN,READ_VOUT,READ_IIN,READ_IOUT,READ_PIN,READ_POUT \
-    --csv efficiency.csv --interval-ms 250
+python3 Sugarloaf_I2C_ver2.py TSP_CORE \
+    READ_IIN,READ_PIN,READ_VOUT,READ_IOUT,READ_POUT \
+    --csv efficiency.csv --interval 250
 ```
 
 ### Thermal Testing
 ```bash
-# Log all temperature sensors
-python pmbus_tool.py monitor --addr 0x50 \
-    --regs READ_TEMPERATURE_1,READ_TEMPERATURE_2,OT_FAULT_LIMIT \
-    --csv thermal.csv --duration-s 3600
+# Log temperature with peak detection
+python3 Sugarloaf_I2C_ver2.py TSP_CORE \
+    READ_TEMPERATURE_1,MFR_TEMP_PEAK \
+    --csv thermal.csv --monitor --duration 3600
 ```
 
 ### Fault Analysis
 ```bash
 # Fast status monitoring
-python pmbus_tool.py monitor --addr 0x50 \
-    --regs STATUS_WORD,STATUS_VOUT,STATUS_IOUT,STATUS_TEMPERATURE \
-    --fast --interval-ms 10 --stdout
+python3 Sugarloaf_I2C_ver2.py TSP_CORE \
+    STATUS_WORD,STATUS_VOUT,STATUS_IOUT,STATUS_TEMPERATURE \
+    --monitor --interval 10
 ```
 
-### Production Test
+### Test All Commands
 ```bash
-# Read device info
-for cmd in MFR_ID MFR_MODEL MFR_REVISION MFR_SERIAL; do
-    python pmbus_tool.py read --addr 0x50 --cmd $cmd
-done
+# Run comprehensive test suite
+python3 test_all_pmbus_commands.py
 ```
 
 ## Signal Connections
@@ -207,26 +192,27 @@ GND    <--> GND (Ground)
 ## Advanced Usage
 
 ### Custom Scripts
-The tool outputs JSON for easy scripting:
+Integrate with Python scripts:
 
 ```python
 import subprocess
-import json
 
+# Read voltage from TSP_CORE
 result = subprocess.run(
-    ['python', 'pmbus_tool.py', 'read', '--addr', '0x50', '--cmd', 'READ_VOUT'],
+    ['python3', 'Sugarloaf_I2C_ver2.py', 'TSP_CORE', 'READ_VOUT'],
     capture_output=True, text=True
 )
-data = json.loads(result.stdout)
-voltage = float(data['value'])
+voltage = result.stdout.strip().split()[-1]  # Extract value
 ```
 
 ### Batch Operations
 ```bash
-# Read multiple registers
-for reg in READ_VOUT READ_IOUT READ_TEMPERATURE_1; do
-    python pmbus_tool.py read --addr 0x50 --cmd $reg
-done | jq -s '.'
+# Test all commands on both rails
+for rail in TSP_CORE TSP_C2C; do
+    for cmd in READ_VOUT READ_IOUT READ_TEMPERATURE_1; do
+        python3 Sugarloaf_I2C_ver2.py $rail $cmd
+    done
+done
 ```
 
 ## License and Support

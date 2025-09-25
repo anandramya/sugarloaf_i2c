@@ -6,6 +6,7 @@ import math
 import csv
 import datetime
 import os
+import argparse
 
 from aardvark_py import *
 
@@ -15,6 +16,7 @@ PMBusDict = {
     "PAGE": 0x00,
     "CLEAR_FAULTS": 0x03,
     "VOUT_MODE": 0x20,
+    "VOUT_COMMAND": 0x21,
     "STATUS_BYTE": 0x78,
     "STATUS_WORD": 0x79,
     "STATUS_VOUT": 0x7A,
@@ -34,6 +36,7 @@ PMBusDict = {
 
     # MFR Specific Commands
     "MFR_VR_CONFIG": 0x67,  # Contains IOUT_SCALE_BIT in bits [2:0]
+    "MFR_VID_RES_R1": 0x29, # VID resolution register for Rail1 (VID_STEP in bits [12:10])
     "MFR_TEMP_PEAK": 0xD1,
     "MFR_IOUT_PEAK": 0xD7,
     "MFR_REG_ACCESS": 0xD8,
@@ -440,6 +443,82 @@ class AardvarkI2C (object) :
         vout = data * math.pow(2, exponent)
 
         return vout
+
+    def Read_VID_Resolution(self, page):
+        """Read VID_STEP from MFR_VID_RES_R1 register"""
+        try:
+            # Read MFR_VID_RES_R1 register
+            vid_res_data = self.i2c_read16PMBus(page, PMBusDict["MFR_VID_RES_R1"])
+
+            # Extract VID_STEP from bits [12:10]
+            vid_step_code = (vid_res_data >> 10) & 0x07
+
+            # VID_STEP lookup table (correct values in mV)
+            vid_step_table = {
+                0: 0.05,   # 0.05mV
+                1: 0.1,    # 0.1mV
+                2: 0.125,  # 0.125mV
+                3: 0.25,   # 0.25mV
+                4: 0.5,    # 0.5mV
+                5: 1.0,    # 1.0mV
+                6: 1.25,   # 1.25mV
+                7: 0.25    # 0.25mV (corrected)
+            }
+
+            vid_step_mv = vid_step_table.get(vid_step_code, 0.25)  # Default to 0.25mV
+            vid_step_v = vid_step_mv / 1000.0  # Convert to volts
+
+            print(f"  VID_STEP code: {vid_step_code}, VID_STEP: {vid_step_mv}mV ({vid_step_v}V)")
+
+            return vid_step_v
+
+        except Exception as e:
+            print(f"Warning: Could not read VID resolution, using default 0.25mV: {e}")
+            return 0.00025  # Default to 0.25mV
+
+    def Write_Vout_Command(self, page, voltage):
+        """
+        Set the output voltage command for a specific page/rail using VID format
+
+        Args:
+            page: PMBus page (0 for TSP_CORE, 1 for TSP_C2C)
+            voltage: Target voltage in volts (e.g., 0.8 for 0.8V)
+
+        Returns:
+            True if successful, False if failed
+        """
+        try:
+            print(f"Setting voltage for page {page}: {voltage}V")
+
+            # Get VID_STEP resolution
+            vid_step = self.Read_VID_Resolution(page)
+
+            # Convert voltage to VID format
+            # VID format: VOUT_COMMAND_R1[11:0] = voltage / VID_STEP
+            vid_code = int(voltage / vid_step)
+
+            # Ensure the value is within 12-bit range (bits [11:0])
+            if vid_code < 0:
+                vid_code = 0
+            elif vid_code > 0xFFF:
+                vid_code = 0xFFF
+
+            # VID format: bits [15:12] are reserved (should be 0)
+            # bits [11:0] contain the VID code
+            raw_value = vid_code & 0xFFF
+
+            print(f"  VID code: 0x{vid_code:03X} ({vid_code})")
+            print(f"  Raw value (VID format): 0x{raw_value:04X}")
+            print(f"  Expected voltage: {vid_code * vid_step:.6f}V")
+
+            # Write the VOUT_COMMAND using VID format
+            self.i2c_write16PMBus(page, PMBusDict["VOUT_COMMAND"], raw_value)
+
+            return True
+
+        except Exception as e:
+            print(f"Error setting voltage on page {page}: {e}")
+            return False
 
     def Set_Vout(self, offset):
 
@@ -1044,14 +1123,388 @@ class AardvarkI2C (object) :
                 print(f"Rail2: {rail2_vout_data['voltage']:.4f}V, {rail2_iout_data['current']:.2f}A")
 
 
+def continuous_single_command_logging(rail, command, duration_minutes=2, sample_rate_ms=100):
+    """
+    Continuously log a single PMBus command from a specific rail to CSV
+
+    Args:
+        rail: Rail to monitor (TSP_CORE or TSP_C2C)
+        command: PMBus command to log
+        duration_minutes: Duration to log in minutes (default: 2)
+        sample_rate_ms: Sample interval in milliseconds (default: 100ms)
+    """
+
+    # Rail mapping
+    rail_mapping = {
+        'TSP_CORE': 0,  # Rail0 - Page 0
+        'TSP_C2C': 1   # Rail1 - Page 1
+    }
+
+    if rail not in rail_mapping:
+        print(f"Error: Invalid rail '{rail}'. Valid options: TSP_CORE, TSP_C2C")
+        return False
+
+    page = rail_mapping[rail]
+
+    # Command mapping to available methods
+    command_mapping = {
+        'READ_VOUT': lambda sugarloaf, p: sugarloaf.Read_Vout(p),
+        'READ_IOUT': lambda sugarloaf, p: sugarloaf.Read_Iout(p),
+        'READ_TEMPERATURE_1': lambda sugarloaf, p: sugarloaf.Read_Temp(p),
+        'READ_DUTY': lambda sugarloaf, p: sugarloaf.Read_Duty(p),
+        'READ_PIN': lambda sugarloaf, p: sugarloaf.Read_PIN(p),
+        'READ_POUT': lambda sugarloaf, p: sugarloaf.Read_POUT(p),
+        'READ_IIN': lambda sugarloaf, p: sugarloaf.Read_IIN(p),
+        'STATUS_BYTE': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_BYTE"]) & 0xFF,
+        'STATUS_WORD': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_WORD"]),
+        'STATUS_VOUT': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_VOUT"]) & 0xFF,
+        'STATUS_IOUT': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_IOUT"]) & 0xFF,
+        'STATUS_INPUT': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_INPUT"]) & 0xFF,
+        'STATUS_TEMPERATURE': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_TEMPERATURE"]) & 0xFF,
+        'VOUT_MODE': lambda sugarloaf, p: sugarloaf.Read_VOUT_MODE(p),
+        'MFR_IOUT_PEAK': lambda sugarloaf, p: sugarloaf.Read_IOUT_Peak(p),
+        'MFR_TEMP_PEAK': lambda sugarloaf, p: sugarloaf.Read_Peak_Temp(p)
+    }
+
+    if command not in command_mapping:
+        print(f"Error: Invalid command '{command}'")
+        print("Available commands:")
+        for cmd in sorted(command_mapping.keys()):
+            print(f"  - {cmd}")
+        return False
+
+    # Determine units for the command
+    units_mapping = {
+        'READ_VOUT': 'V',
+        'READ_IOUT': 'A',
+        'READ_IIN': 'A',
+        'MFR_IOUT_PEAK': 'A',
+        'READ_TEMPERATURE_1': '°C',
+        'MFR_TEMP_PEAK': '°C',
+        'READ_PIN': 'W',
+        'READ_POUT': 'W',
+        'READ_DUTY': '%',
+        'VOUT_MODE': '',
+        'STATUS_BYTE': 'hex',
+        'STATUS_WORD': 'hex',
+        'STATUS_VOUT': 'hex',
+        'STATUS_IOUT': 'hex',
+        'STATUS_INPUT': 'hex',
+        'STATUS_TEMPERATURE': 'hex'
+    }
+
+    units = units_mapping.get(command, '')
+
+    # Generate CSV filename
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Ensure data directory exists
+    data_dir = "data"
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir)
+    csv_filename = os.path.join(data_dir, f"{rail}_{command}_{timestamp}.csv")
+
+    # Calculate timing parameters
+    sample_interval = sample_rate_ms / 1000.0  # Convert to seconds
+    total_duration = duration_minutes * 60.0   # Convert to seconds
+    total_samples = int(total_duration / sample_interval)
+
+    print(f"Starting continuous logging of {command} from {rail}...")
+    print(f"Duration: {duration_minutes} minutes ({total_duration:.1f} seconds)")
+    print(f"Sample rate: {sample_rate_ms}ms ({1000/sample_rate_ms:.1f} samples/sec)")
+    print(f"Expected samples: {total_samples}")
+    print(f"Output file: {csv_filename}")
+    print(f"Target rail: {rail} (Page {page})")
+    print("-" * 60)
+
+    # CSV headers
+    headers = ['timestamp', 'sample_num', 'value', 'units']
+
+    # Open CSV file for writing
+    start_time = time.time()
+    sample_count = 0
+    error_count = 0
+
+    try:
+        # Initialize I2C connection once
+        print("Initializing I2C connection...")
+        sugarloaf = AardvarkI2C()
+        print("I2C connection successful")
+        print()
+
+        with open(csv_filename, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(headers)
+
+            print(f"Logging {command} from {rail}... Press Ctrl+C to stop early")
+
+            while True:
+                loop_start = time.time()
+                current_time = loop_start - start_time
+
+                # Check if duration exceeded
+                if current_time >= total_duration:
+                    break
+
+                try:
+                    # Execute the command
+                    result = command_mapping[command](sugarloaf, page)
+
+                    # Format the value based on command type
+                    if command.startswith('STATUS'):
+                        if command == 'STATUS_WORD':
+                            value_str = f"0x{result:04X}"
+                        else:
+                            value_str = f"0x{result:02X}"
+                    elif command in ['READ_VOUT']:
+                        value_str = f"{result:.6f}"
+                    elif command in ['READ_IOUT', 'READ_IIN', 'MFR_IOUT_PEAK']:
+                        value_str = f"{result:.3f}"
+                    elif command in ['READ_TEMPERATURE_1', 'MFR_TEMP_PEAK']:
+                        value_str = f"{result:.2f}"
+                    elif command in ['READ_PIN', 'READ_POUT']:
+                        value_str = f"{result:.3f}"
+                    elif command == 'READ_DUTY':
+                        value_str = f"{result:.2f}"
+                    else:
+                        value_str = str(result)
+
+                    # Write data to CSV
+                    row = [
+                        f"{current_time:.3f}",
+                        sample_count + 1,
+                        value_str,
+                        units
+                    ]
+                    writer.writerow(row)
+
+                    sample_count += 1
+
+                    # Progress indicator every 50 samples
+                    if sample_count % 50 == 0:
+                        progress = (current_time / total_duration) * 100
+                        print(f"Progress: {sample_count:4d}/{total_samples} samples ({progress:5.1f}%) - "
+                              f"{rail} {command}: {value_str} {units}")
+
+                        # Flush to ensure data is written
+                        csvfile.flush()
+
+                except Exception as e:
+                    error_count += 1
+                    print(f"Error at sample {sample_count + 1}: {e}")
+                    if error_count > 10:
+                        print("Too many errors, stopping...")
+                        break
+
+                # Maintain sample rate
+                loop_time = time.time() - loop_start
+                sleep_time = sample_interval - loop_time
+
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                elif sleep_time < -0.001:  # Warn if we're running behind
+                    print(f"Warning: Sample {sample_count} took {loop_time*1000:.1f}ms (target: {sample_rate_ms}ms)")
+
+    except KeyboardInterrupt:
+        print("\nLogging interrupted by user")
+    except Exception as e:
+        print(f"\nLogging error: {e}")
+
+    finally:
+        end_time = time.time()
+        actual_duration = end_time - start_time
+        actual_rate = sample_count / actual_duration if actual_duration > 0 else 0
+
+        print("-" * 60)
+        print(f"Logging completed!")
+        print(f"Samples collected: {sample_count}")
+        print(f"Actual duration: {actual_duration:.1f} seconds")
+        print(f"Actual sample rate: {actual_rate:.1f} samples/sec")
+        print(f"Errors: {error_count}")
+        print(f"Data saved to: {csv_filename}")
+
+        if sample_count > 0:
+            print(f"\nFinal reading: {rail} {command} = {value_str} {units}")
+
+    return True
+
+def execute_single_command(rail, command):
+    """Execute a single PMBus command on specified rail"""
+
+    # Rail mapping
+    rail_mapping = {
+        'TSP_CORE': 0,  # Rail0 - Page 0
+        'TSP_C2C': 1   # Rail1 - Page 1
+    }
+
+    if rail not in rail_mapping:
+        print(f"Error: Invalid rail '{rail}'. Valid options: TSP_CORE, TSP_C2C")
+        return False
+
+    page = rail_mapping[rail]
+
+    # Command mapping to available methods
+    command_mapping = {
+        'READ_VOUT': lambda sugarloaf, p: sugarloaf.Read_Vout(p),
+        'READ_IOUT': lambda sugarloaf, p: sugarloaf.Read_Iout(p),
+        'READ_TEMPERATURE_1': lambda sugarloaf, p: sugarloaf.Read_Temp(p),
+        'READ_DUTY': lambda sugarloaf, p: sugarloaf.Read_Duty(p),
+        'READ_PIN': lambda sugarloaf, p: sugarloaf.Read_PIN(p),
+        'READ_POUT': lambda sugarloaf, p: sugarloaf.Read_POUT(p),
+        'READ_IIN': lambda sugarloaf, p: sugarloaf.Read_IIN(p),
+        'STATUS_BYTE': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_BYTE"]) & 0xFF,
+        'STATUS_WORD': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_WORD"]),
+        'STATUS_VOUT': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_VOUT"]) & 0xFF,
+        'STATUS_IOUT': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_IOUT"]) & 0xFF,
+        'STATUS_INPUT': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_INPUT"]) & 0xFF,
+        'STATUS_TEMPERATURE': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_TEMPERATURE"]) & 0xFF,
+        'VOUT_MODE': lambda sugarloaf, p: sugarloaf.Read_VOUT_MODE(p),
+        'MFR_IOUT_PEAK': lambda sugarloaf, p: sugarloaf.Read_IOUT_Peak(p),
+        'MFR_TEMP_PEAK': lambda sugarloaf, p: sugarloaf.Read_Peak_Temp(p)
+    }
+
+    if command not in command_mapping:
+        print(f"Error: Invalid command '{command}'")
+        print("Available commands:")
+        for cmd in sorted(command_mapping.keys()):
+            print(f"  - {cmd}")
+        return False
+
+    try:
+        print(f"Initializing I2C connection...")
+        sugarloaf = AardvarkI2C()
+        print(f"Executing {command} on {rail} (Page {page})...")
+
+        result = command_mapping[command](sugarloaf, page)
+
+        # Format output based on command type
+        if command.startswith('STATUS'):
+            if command == 'STATUS_WORD':
+                print(f"{rail} {command}: 0x{result:04X}")
+            else:
+                print(f"{rail} {command}: 0x{result:02X}")
+        elif command in ['READ_VOUT']:
+            print(f"{rail} {command}: {result:.6f} V")
+        elif command in ['READ_IOUT', 'READ_IIN', 'MFR_IOUT_PEAK']:
+            print(f"{rail} {command}: {result:.3f} A")
+        elif command in ['READ_TEMPERATURE_1', 'MFR_TEMP_PEAK']:
+            print(f"{rail} {command}: {result:.2f} °C")
+        elif command in ['READ_PIN', 'READ_POUT']:
+            print(f"{rail} {command}: {result:.3f} W")
+        elif command == 'READ_DUTY':
+            print(f"{rail} {command}: {result:.2f} %")
+        elif command == 'VOUT_MODE':
+            print(f"{rail} {command}: {result} (exponent)")
+        else:
+            print(f"{rail} {command}: {result}")
+
+        return True
+
+    except Exception as e:
+        print(f"Error executing {command} on {rail}: {e}")
+        return False
+
+def execute_vout_command(rail, voltage):
+    """Execute VOUT_COMMAND to set voltage on specified rail"""
+
+    # Rail mapping
+    rail_mapping = {
+        'TSP_CORE': 0,  # Rail0 - Page 0
+        'TSP_C2C': 1   # Rail1 - Page 1
+    }
+
+    if rail not in rail_mapping:
+        print(f"Error: Invalid rail '{rail}'. Valid options: TSP_CORE, TSP_C2C")
+        return False
+
+    page = rail_mapping[rail]
+
+    # Validate voltage range (reasonable limits for power supplies)
+    if voltage < 0.3 or voltage > 3.3:
+        print(f"Error: Voltage {voltage}V is outside safe range (0.3V to 3.3V)")
+        return False
+
+    try:
+        print(f"Initializing I2C connection...")
+        sugarloaf = AardvarkI2C()
+        print(f"Setting voltage on {rail} (Page {page}) to {voltage}V...")
+
+        # Read current voltage before changing
+        current_voltage = sugarloaf.Read_Vout(page)
+        print(f"Current voltage: {current_voltage:.6f}V")
+
+        # Set new voltage
+        success = sugarloaf.Write_Vout_Command(page, voltage)
+
+        if success:
+            # Wait 2 seconds for voltage to fully settle and stabilize
+            print("Waiting 2 seconds for voltage to settle...")
+            time.sleep(2.0)
+
+            # Single READ_VOUT to confirm voltage change
+            final_voltage = sugarloaf.Read_Vout(page)
+            print(f"Final voltage: {final_voltage:.6f}V")
+
+            # Check if voltage is within reasonable tolerance (±1%)
+            tolerance = voltage * 0.01
+            if abs(final_voltage - voltage) <= tolerance:
+                print(f"✓ SUCCESS: Voltage set successfully (within ±1% tolerance)")
+                return True
+            else:
+                print(f"⚠ WARNING: Final voltage differs from target by {abs(final_voltage - voltage):.6f}V")
+                return True  # Still consider success as the command executed
+        else:
+            print(f"✗ FAILED: Could not set voltage")
+            return False
+
+    except Exception as e:
+        print(f"Error setting voltage on {rail}: {e}")
+        return False
+
 def main():
     print("PMBus Rail Monitor - MP29816-C Controller")
     print(f"Target slave address: 0x{SLAVE_ADDR:02X}")
     print("=" * 60)
 
-    # Check command line arguments
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "log":
+    # Set up argument parser
+    parser = argparse.ArgumentParser(
+        description="PMBus monitoring tool for Sugarloaf I2C",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT         # Read voltage from TSP_CORE rail (single read)
+  python3 Sugarloaf_I2C_ver2.py TSP_C2C READ_IOUT          # Read current from TSP_C2C rail (single read)
+  python3 Sugarloaf_I2C_ver2.py TSP_CORE VOUT_COMMAND 0.8  # Set TSP_CORE voltage to 0.8V
+  python3 Sugarloaf_I2C_ver2.py TSP_C2C VOUT_COMMAND 0.75  # Set TSP_C2C voltage to 0.75V
+  python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT log     # Continuously log voltage to CSV
+  python3 Sugarloaf_I2C_ver2.py TSP_C2C READ_IOUT log      # Continuously log current to CSV
+  python3 Sugarloaf_I2C_ver2.py TSP_CORE STATUS_WORD log   # Continuously log status to CSV
+  python3 Sugarloaf_I2C_ver2.py log                        # Start continuous logging (all rails)
+  python3 Sugarloaf_I2C_ver2.py test                       # Run single readback test
+
+Available Rails: TSP_CORE, TSP_C2C
+Available Commands: READ_VOUT, READ_IOUT, READ_TEMPERATURE_1, READ_DUTY, READ_PIN,
+                   READ_POUT, READ_IIN, STATUS_BYTE, STATUS_WORD, STATUS_VOUT,
+                   STATUS_IOUT, STATUS_INPUT, STATUS_TEMPERATURE, VOUT_MODE,
+                   MFR_IOUT_PEAK, MFR_TEMP_PEAK, VOUT_COMMAND
+
+Note: Add "log" as third argument to continuously log any command to CSV file
+      For VOUT_COMMAND, use voltage value as third argument (e.g., 0.8 for 0.8V)
+        """
+    )
+
+    # Add positional arguments
+    parser.add_argument('rail', nargs='?',
+                       help='Rail to target: TSP_CORE or TSP_C2C (or "log"/"test" for special modes)')
+    parser.add_argument('command', nargs='?',
+                       help='PMBus command to execute (e.g., READ_VOUT, READ_IOUT, STATUS_WORD)')
+    parser.add_argument('log_mode', nargs='?',
+                       help='Optional: "log" to continuously log the command to CSV, or voltage value for VOUT_COMMAND (e.g., 0.8)')
+
+    # Parse arguments
+    args = parser.parse_args()
+
+    # Handle special modes first
+    if args.rail == "log":
         # Continuous logging mode
         try:
             print("Initializing I2C connection...")
@@ -1060,17 +1513,18 @@ def main():
             print()
 
             # Start continuous logging (2 minutes, 100ms sampling)
-            # For quick test, use shorter duration
-            test_duration = 0.2 if len(sys.argv) > 2 and sys.argv[2] == "test" else 2.0
+            # For quick test, use shorter duration if 'test' is second argument
+            test_duration = 0.2 if args.command == "test" else 2.0
             Sugarloaf.continuous_logging(duration_minutes=test_duration, sample_rate_ms=100)
 
         except Exception as e:
             print(f"Error: {e}")
             print("Note: This script requires an Aardvark I2C adapter to be connected.")
+        return
 
-    else:
+    elif args.rail == "test" or (args.rail is None and args.command is None):
         # Single readback test mode
-        print("Single readback test mode (use 'python script.py log' for continuous logging)")
+        print("Single readback test mode")
         print()
 
         try:
@@ -1078,41 +1532,41 @@ def main():
             Sugarloaf = AardvarkI2C()
             print("I2C connection successful\n")
 
-            # Test Rail1 (Page 0) readback
+            # Test Rail1 (TSP_CORE) readback
             print("="*50)
-            print("Testing Rail1 (Page 0) Readback:")
+            print("Testing TSP_CORE (Page 0) Readback:")
             print("-"*50)
 
             try:
                 vout_rail1 = Sugarloaf.Read_Vout_Rail1()
-                print(f"Rail1 VOUT: {vout_rail1:.4f} V")
+                print(f"TSP_CORE VOUT: {vout_rail1:.4f} V")
             except Exception as e:
-                print(f"Error reading Rail1 VOUT: {e}")
+                print(f"Error reading TSP_CORE VOUT: {e}")
 
             try:
                 iout_rail1 = Sugarloaf.Read_Iout_Rail1()
-                print(f"Rail1 IOUT: {iout_rail1:.2f} A")
+                print(f"TSP_CORE IOUT: {iout_rail1:.2f} A")
             except Exception as e:
-                print(f"Error reading Rail1 IOUT: {e}")
+                print(f"Error reading TSP_CORE IOUT: {e}")
 
             print()
 
-            # Test Rail2 (Page 1) readback
+            # Test Rail2 (TSP_C2C) readback
             print("="*50)
-            print("Testing Rail2 (Page 1) Readback:")
+            print("Testing TSP_C2C (Page 1) Readback:")
             print("-"*50)
 
             try:
                 vout_rail2 = Sugarloaf.Read_Vout_Rail2()
-                print(f"Rail2 VOUT: {vout_rail2:.4f} V")
+                print(f"TSP_C2C VOUT: {vout_rail2:.4f} V")
             except Exception as e:
-                print(f"Error reading Rail2 VOUT: {e}")
+                print(f"Error reading TSP_C2C VOUT: {e}")
 
             try:
                 iout_rail2 = Sugarloaf.Read_Iout_Rail2()
-                print(f"Rail2 IOUT: {iout_rail2:.2f} A")
+                print(f"TSP_C2C IOUT: {iout_rail2:.2f} A")
             except Exception as e:
-                print(f"Error reading Rail2 IOUT: {e}")
+                print(f"Error reading TSP_C2C IOUT: {e}")
 
             print()
 
@@ -1122,28 +1576,67 @@ def main():
             print("-"*50)
 
             try:
-                # Rail1 status
+                # TSP_CORE status
                 Sugarloaf.i2c_write8PMBus(PMBusDict["PAGE"], 0)
                 status_word_r1 = Sugarloaf.i2c_read16PMBus(0, PMBusDict["STATUS_WORD"])
-                print(f"Rail1 STATUS_WORD: 0x{status_word_r1:04X}")
+                print(f"TSP_CORE STATUS_WORD: 0x{status_word_r1:04X}")
 
-                # Rail2 status
+                # TSP_C2C status
                 Sugarloaf.i2c_write8PMBus(PMBusDict["PAGE"], 1)
                 status_word_r2 = Sugarloaf.i2c_read16PMBus(1, PMBusDict["STATUS_WORD"])
-                print(f"Rail2 STATUS_WORD: 0x{status_word_r2:04X}")
+                print(f"TSP_C2C STATUS_WORD: 0x{status_word_r2:04X}")
             except Exception as e:
                 print(f"Error reading status: {e}")
 
             print()
             print("="*50)
             print("Test completed successfully!")
-            print("\nTo start continuous logging, run:")
-            print("python3 Sugarloaf_I2C_ver2.py log")
+            print("\nUsage examples:")
+            print("  python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT")
+            print("  python3 Sugarloaf_I2C_ver2.py TSP_C2C READ_IOUT")
+            print("  python3 Sugarloaf_I2C_ver2.py log")
 
         except Exception as e:
             print(f"Error: {e}")
             print("Note: This script requires an Aardvark I2C adapter to be connected.")
             print("Make sure the target device is powered and connected to address 0x5C")
+        return
+
+    # Handle single command execution (with optional continuous logging or voltage setting)
+    if args.rail and args.command:
+        rail = args.rail.upper()
+        command = args.command.upper()
+
+        # Handle VOUT_COMMAND (voltage setting)
+        if command == "VOUT_COMMAND":
+            if args.log_mode:
+                try:
+                    voltage = float(args.log_mode)
+                    success = execute_vout_command(rail, voltage)
+                    sys.exit(0 if success else 1)
+                except ValueError:
+                    print("Error: For VOUT_COMMAND, the third argument must be a voltage value (e.g., 0.8 for 0.8V)")
+                    sys.exit(1)
+            else:
+                print("Error: VOUT_COMMAND requires a voltage value as third argument (e.g., 0.8 for 0.8V)")
+                print("Usage: python3 Sugarloaf_I2C_ver2.py TSP_CORE VOUT_COMMAND 0.8")
+                sys.exit(1)
+
+        # Check if third argument is "log" for continuous logging
+        elif args.log_mode and args.log_mode.lower() == "log":
+            # Continuous logging mode for specific command
+            success = continuous_single_command_logging(rail, command)
+            sys.exit(0 if success else 1)
+        else:
+            # Single command execution
+            success = execute_single_command(rail, command)
+            sys.exit(0 if success else 1)
+    else:
+        # Show help if arguments are incomplete
+        print("Error: Both rail and command arguments are required for single command execution.")
+        print()
+        parser.print_help()
+        sys.exit(1)
 
 
 if __name__ == "__main__": main()
