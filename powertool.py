@@ -1405,28 +1405,83 @@ def execute_single_command(rail, command):
         powertool = PowerToolI2C()
         print(f"Executing {command} on {rail} (Page {page})...")
 
+        # Get the calculated result
         result = command_mapping[command](powertool, page)
 
-        # Format output based on command type
+        # Also read the raw register value for display
+        raw_value = None
+        register_address = None
+
+        # Map commands to their register addresses
+        register_mapping = {
+            'READ_VOUT': PMBusDict["READ_VOUT"],
+            'READ_IOUT': PMBusDict["READ_IOUT"],
+            'READ_IIN': PMBusDict["READ_IIN"],
+            'READ_TEMPERATURE_1': PMBusDict["READ_TEMPERATURE_1"],
+            'READ_PIN': PMBusDict["READ_PIN"],
+            'READ_POUT': PMBusDict["READ_POUT"],
+            'READ_DUTY': PMBusDict["READ_DUTY"],
+            'STATUS_BYTE': PMBusDict["STATUS_BYTE"],
+            'STATUS_WORD': PMBusDict["STATUS_WORD"],
+            'STATUS_VOUT': PMBusDict["STATUS_VOUT"],
+            'STATUS_IOUT': PMBusDict["STATUS_IOUT"],
+            'STATUS_INPUT': PMBusDict["STATUS_INPUT"],
+            'STATUS_TEMPERATURE': PMBusDict["STATUS_TEMPERATURE"],
+            'VOUT_MODE': PMBusDict["VOUT_MODE"],
+            'MFR_IOUT_PEAK': PMBusDict["MFR_IOUT_PEAK"],
+            'MFR_TEMP_PEAK': PMBusDict["MFR_TEMP_PEAK"]
+        }
+
+        if command in register_mapping:
+            register_address = register_mapping[command]
+            if command in ['STATUS_BYTE', 'VOUT_MODE']:
+                # 8-bit registers
+                raw_value = powertool.i2c_read8PMBus(page, register_address)
+            else:
+                # 16-bit registers
+                raw_value = powertool.i2c_read16PMBus(page, register_address)
+
+        # Format output based on command type with raw value
         if command.startswith('STATUS'):
             if command == 'STATUS_WORD':
-                print(f"{rail} {command}: 0x{result:04X}")
+                print(f"{rail} {command}: 0x{result:04X} (raw: 0x{raw_value:04X})")
             else:
-                print(f"{rail} {command}: 0x{result:02X}")
+                print(f"{rail} {command}: 0x{result:02X} (raw: 0x{raw_value:02X})")
         elif command in ['READ_VOUT']:
-            print(f"{rail} {command}: {result:.6f} V")
+            if raw_value is not None:
+                print(f"{rail} {command}: {result:.6f} V (raw: 0x{raw_value:04X})")
+            else:
+                print(f"{rail} {command}: {result:.6f} V")
         elif command in ['READ_IOUT', 'READ_IIN', 'MFR_IOUT_PEAK']:
-            print(f"{rail} {command}: {result:.3f} A")
+            if raw_value is not None:
+                print(f"{rail} {command}: {result:.3f} A (raw: 0x{raw_value:04X})")
+            else:
+                print(f"{rail} {command}: {result:.3f} A")
         elif command in ['READ_TEMPERATURE_1', 'MFR_TEMP_PEAK']:
-            print(f"{rail} {command}: {result:.2f} °C")
+            if raw_value is not None:
+                print(f"{rail} {command}: {result:.2f} °C (raw: 0x{raw_value:04X})")
+            else:
+                print(f"{rail} {command}: {result:.2f} °C")
         elif command in ['READ_PIN', 'READ_POUT']:
-            print(f"{rail} {command}: {result:.3f} W")
+            if raw_value is not None:
+                print(f"{rail} {command}: {result:.3f} W (raw: 0x{raw_value:04X})")
+            else:
+                print(f"{rail} {command}: {result:.3f} W")
         elif command == 'READ_DUTY':
-            print(f"{rail} {command}: {result:.2f} %")
+            if raw_value is not None:
+                print(f"{rail} {command}: {result:.2f} % (raw: 0x{raw_value:04X})")
+            else:
+                print(f"{rail} {command}: {result:.2f} %")
         elif command == 'VOUT_MODE':
-            print(f"{rail} {command}: {result} (exponent)")
+            if raw_value is not None:
+                print(f"{rail} {command}: {result} (exponent) (raw: 0x{raw_value:02X})")
+            else:
+                print(f"{rail} {command}: {result} (exponent)")
         else:
-            print(f"{rail} {command}: {result}")
+            if raw_value is not None:
+                print(f"{rail} {command}: {result} (raw: 0x{raw_value:04X})")
+            else:
+                print(f"{rail} {command}: {result}")
 
         return True
 
