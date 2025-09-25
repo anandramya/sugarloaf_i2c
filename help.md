@@ -38,8 +38,30 @@ Read a single PMBus register:
 ./powertool.py TSP_C2C STATUS_BYTE
 ```
 
-### Direct Register Access
-Read any PMBus register by English name or hex address:
+### Direct Hex Register Access (New)
+Read/write any PMBus register directly by hex address with simplified syntax:
+```bash
+# Simplified hex register reads (defaults to 2 bytes)
+./powertool.py TSP_CORE READ 0x21      # Read VOUT_COMMAND from page 0
+./powertool.py TSP_C2C READ 0x8B       # Read READ_VOUT from page 1
+./powertool.py TSP_CORE READ 0x79      # Read STATUS_WORD from page 0
+
+# Single-byte register reads
+./powertool.py TSP_CORE READ 0x20 1    # Read VOUT_MODE (1 byte)
+./powertool.py TSP_C2C READ 0x78 1     # Read STATUS_BYTE (1 byte)
+
+# Direct hex register writes (with verification)
+./powertool.py TSP_CORE WRITE 0x21 0x0800    # Write to VOUT_COMMAND
+./powertool.py TSP_C2C WRITE 0x03 0x00       # Clear faults on page 1
+
+# Multiple hex formats supported
+./powertool.py TSP_CORE READ 0x8B      # Standard hex (0x prefix)
+./powertool.py TSP_CORE READ 8Bh       # Intel hex format (h suffix)
+./powertool.py TSP_CORE READ 8B        # Plain hex (no prefix)
+```
+
+### Legacy Direct Register Access
+Read any PMBus register by English name or hex address using the legacy format:
 ```bash
 # Single reads using English command names (preferred)
 ./powertool.py page 0 READ_VOUT READ 2
@@ -151,7 +173,48 @@ Supported rails:
 - Use `--fast` mode
 - Check USB connection quality
 
+## Common Register Reference
+
+### PMBus Register Map (Hex Addresses)
+| Register | Address | Size | Description |
+|----------|---------|------|-------------|
+| VOUT_COMMAND | 0x21 | 2 bytes | Voltage setpoint command |
+| VOUT_MODE | 0x20 | 1 byte | Voltage encoding mode |
+| READ_VOUT | 0x8B | 2 bytes | Actual output voltage |
+| READ_IOUT | 0x8C | 2 bytes | Output current |
+| READ_TEMPERATURE_1 | 0x8D | 2 bytes | Primary temperature |
+| STATUS_BYTE | 0x78 | 1 byte | Summary status |
+| STATUS_WORD | 0x79 | 2 bytes | Detailed status |
+| STATUS_VOUT | 0x7A | 1 byte | Output voltage status |
+| STATUS_IOUT | 0x7B | 1 byte | Output current status |
+| CLEAR_FAULTS | 0x03 | 0 bytes | Clear all faults command |
+| MFR_VID_RES_R1 | 0x29 | 2 bytes | VID resolution settings |
+| MFR_VR_CONFIG | 0x67 | 2 bytes | VR configuration |
+
 ## Examples
+
+### Hex Register Examples (New Simplified Format)
+```bash
+# Quick voltage check
+./powertool.py TSP_CORE READ 0x8B      # Read actual voltage
+./powertool.py TSP_C2C READ 0x8B       # Read TSP_C2C voltage
+
+# Status monitoring
+./powertool.py TSP_CORE READ 0x79      # Check detailed status
+./powertool.py TSP_CORE READ 0x78 1    # Check summary status
+
+# Configuration reads
+./powertool.py TSP_CORE READ 0x29      # Check VID resolution
+./powertool.py TSP_CORE READ 0x20 1    # Check voltage mode
+
+# Write operations (with verification)
+./powertool.py TSP_CORE WRITE 0x21 0x0C00  # Set voltage to ~0.75V
+./powertool.py TSP_CORE WRITE 0x03 0x00    # Clear all faults
+
+# Both rails comparison
+./powertool.py TSP_CORE READ 0x21      # TSP_CORE setpoint
+./powertool.py TSP_C2C READ 0x21       # TSP_C2C setpoint
+```
 
 ### Power Supply Monitoring
 ```bash
