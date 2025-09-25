@@ -1179,22 +1179,22 @@ def continuous_single_command_logging(rail, command, duration_minutes=2, sample_
 
     # Command mapping to available methods
     command_mapping = {
-        'READ_VOUT': lambda sugarloaf, p: sugarloaf.Read_Vout(p),
-        'READ_IOUT': lambda sugarloaf, p: sugarloaf.Read_Iout(p),
-        'READ_TEMPERATURE_1': lambda sugarloaf, p: sugarloaf.Read_Temp(p),
-        'READ_DUTY': lambda sugarloaf, p: sugarloaf.Read_Duty(p),
-        'READ_PIN': lambda sugarloaf, p: sugarloaf.Read_PIN(p),
-        'READ_POUT': lambda sugarloaf, p: sugarloaf.Read_POUT(p),
-        'READ_IIN': lambda sugarloaf, p: sugarloaf.Read_IIN(p),
-        'STATUS_BYTE': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_BYTE"]) & 0xFF,
-        'STATUS_WORD': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_WORD"]),
-        'STATUS_VOUT': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_VOUT"]) & 0xFF,
-        'STATUS_IOUT': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_IOUT"]) & 0xFF,
-        'STATUS_INPUT': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_INPUT"]) & 0xFF,
-        'STATUS_TEMPERATURE': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_TEMPERATURE"]) & 0xFF,
-        'VOUT_MODE': lambda sugarloaf, p: sugarloaf.Read_VOUT_MODE(p),
-        'MFR_IOUT_PEAK': lambda sugarloaf, p: sugarloaf.Read_IOUT_Peak(p),
-        'MFR_TEMP_PEAK': lambda sugarloaf, p: sugarloaf.Read_Peak_Temp(p)
+        'READ_VOUT': lambda powertool, p: powertool.Read_Vout(p),
+        'READ_IOUT': lambda powertool, p: powertool.Read_Iout(p),
+        'READ_TEMPERATURE_1': lambda powertool, p: powertool.Read_Temp(p),
+        'READ_DUTY': lambda powertool, p: powertool.Read_Duty(p),
+        'READ_PIN': lambda powertool, p: powertool.Read_PIN(p),
+        'READ_POUT': lambda powertool, p: powertool.Read_POUT(p),
+        'READ_IIN': lambda powertool, p: powertool.Read_IIN(p),
+        'STATUS_BYTE': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_BYTE"]) & 0xFF,
+        'STATUS_WORD': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_WORD"]),
+        'STATUS_VOUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_VOUT"]) & 0xFF,
+        'STATUS_IOUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_IOUT"]) & 0xFF,
+        'STATUS_INPUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_INPUT"]) & 0xFF,
+        'STATUS_TEMPERATURE': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_TEMPERATURE"]) & 0xFF,
+        'VOUT_MODE': lambda powertool, p: powertool.Read_VOUT_MODE(p),
+        'MFR_IOUT_PEAK': lambda powertool, p: powertool.Read_IOUT_Peak(p),
+        'MFR_TEMP_PEAK': lambda powertool, p: powertool.Read_Peak_Temp(p)
     }
 
     if command not in command_mapping:
@@ -1278,7 +1278,7 @@ def continuous_single_command_logging(rail, command, duration_minutes=2, sample_
 
                 try:
                     # Execute the command
-                    result = command_mapping[command](sugarloaf, page)
+                    result = command_mapping[command](powertool, page)
 
                     # Format the value based on command type
                     if command.startswith('STATUS'):
@@ -1375,22 +1375,22 @@ def execute_single_command(rail, command):
 
     # Command mapping to available methods
     command_mapping = {
-        'READ_VOUT': lambda sugarloaf, p: sugarloaf.Read_Vout(p),
-        'READ_IOUT': lambda sugarloaf, p: sugarloaf.Read_Iout(p),
-        'READ_TEMPERATURE_1': lambda sugarloaf, p: sugarloaf.Read_Temp(p),
-        'READ_DUTY': lambda sugarloaf, p: sugarloaf.Read_Duty(p),
-        'READ_PIN': lambda sugarloaf, p: sugarloaf.Read_PIN(p),
-        'READ_POUT': lambda sugarloaf, p: sugarloaf.Read_POUT(p),
-        'READ_IIN': lambda sugarloaf, p: sugarloaf.Read_IIN(p),
-        'STATUS_BYTE': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_BYTE"]) & 0xFF,
-        'STATUS_WORD': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_WORD"]),
-        'STATUS_VOUT': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_VOUT"]) & 0xFF,
-        'STATUS_IOUT': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_IOUT"]) & 0xFF,
-        'STATUS_INPUT': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_INPUT"]) & 0xFF,
-        'STATUS_TEMPERATURE': lambda sugarloaf, p: sugarloaf.i2c_read16PMBus(p, PMBusDict["STATUS_TEMPERATURE"]) & 0xFF,
-        'VOUT_MODE': lambda sugarloaf, p: sugarloaf.Read_VOUT_MODE(p),
-        'MFR_IOUT_PEAK': lambda sugarloaf, p: sugarloaf.Read_IOUT_Peak(p),
-        'MFR_TEMP_PEAK': lambda sugarloaf, p: sugarloaf.Read_Peak_Temp(p)
+        'READ_VOUT': lambda powertool, p: powertool.Read_Vout(p),
+        'READ_IOUT': lambda powertool, p: powertool.Read_Iout(p),
+        'READ_TEMPERATURE_1': lambda powertool, p: powertool.Read_Temp(p),
+        'READ_DUTY': lambda powertool, p: powertool.Read_Duty(p),
+        'READ_PIN': lambda powertool, p: powertool.Read_PIN(p),
+        'READ_POUT': lambda powertool, p: powertool.Read_POUT(p),
+        'READ_IIN': lambda powertool, p: powertool.Read_IIN(p),
+        'STATUS_BYTE': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_BYTE"]) & 0xFF,
+        'STATUS_WORD': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_WORD"]),
+        'STATUS_VOUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_VOUT"]) & 0xFF,
+        'STATUS_IOUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_IOUT"]) & 0xFF,
+        'STATUS_INPUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_INPUT"]) & 0xFF,
+        'STATUS_TEMPERATURE': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_TEMPERATURE"]) & 0xFF,
+        'VOUT_MODE': lambda powertool, p: powertool.Read_VOUT_MODE(p),
+        'MFR_IOUT_PEAK': lambda powertool, p: powertool.Read_IOUT_Peak(p),
+        'MFR_TEMP_PEAK': lambda powertool, p: powertool.Read_Peak_Temp(p)
     }
 
     if command not in command_mapping:
@@ -1405,7 +1405,7 @@ def execute_single_command(rail, command):
         powertool = PowerToolI2C()
         print(f"Executing {command} on {rail} (Page {page})...")
 
-        result = command_mapping[command](sugarloaf, page)
+        result = command_mapping[command](powertool, page)
 
         # Format output based on command type
         if command.startswith('STATUS'):
@@ -1460,11 +1460,11 @@ def execute_vout_command(rail, voltage):
         print(f"Setting voltage on {rail} (Page {page}) to {voltage}V...")
 
         # Read current voltage before changing
-        current_voltage = sugarloaf.Read_Vout(page)
+        current_voltage = powertool.Read_Vout(page)
         print(f"Current voltage: {current_voltage:.6f}V")
 
         # Set new voltage
-        success = sugarloaf.Write_Vout_Command(page, voltage)
+        success = powertool.Write_Vout_Command(page, voltage)
 
         if success:
             # Wait 2 seconds for voltage to fully settle and stabilize
@@ -1472,7 +1472,7 @@ def execute_vout_command(rail, voltage):
             time.sleep(2.0)
 
             # Single READ_VOUT to confirm voltage change
-            final_voltage = sugarloaf.Read_Vout(page)
+            final_voltage = powertool.Read_Vout(page)
             print(f"Final voltage: {final_voltage:.6f}V")
 
             # Check if voltage is within reasonable tolerance (±1%)
