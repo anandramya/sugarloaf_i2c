@@ -1,4 +1,4 @@
-# PMBus Tool — Extended Help
+# PowerTool — Extended Help
 
 A fast, production-grade PMBus command-line tool for Total Phase Aardvark I²C adapters.
 
@@ -11,63 +11,78 @@ A fast, production-grade PMBus command-line tool for Total Phase Aardvark I²C a
    pip install PyYAML aardvark_py
    # Also install Total Phase Aardvark drivers from totalphase.com
    ```
+4. Make the script executable (optional):
+   ```bash
+   chmod +x powertool.py
+   # Now you can run: ./powertool.py instead of python3 powertool.py
+   ```
 
 ## Commands
 
 ### Scan
 Find all I²C devices on the bus (0x20-0x7F range):
 ```bash
-python3 Sugarloaf_I2C_ver2.py scan
-python3 Sugarloaf_I2C_ver2.py scan --port 0 --bitrate-khz 100
+./powertool.py scan
+./powertool.py scan --port 0 --bitrate-khz 100
 ```
 
 ### Read
 Read a single PMBus register:
 ```bash
 # Read by rail and command name
-python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT
-python3 Sugarloaf_I2C_ver2.py TSP_C2C READ_IOUT
-
-# Read by address and command
-python3 Sugarloaf_I2C_ver2.py --addr 0x5C --cmd READ_VOUT
-
-# With PEC verification
-python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT --pec
+./powertool.py TSP_CORE READ_VOUT
+./powertool.py TSP_C2C READ_IOUT
 
 # Read status registers
-python3 Sugarloaf_I2C_ver2.py TSP_CORE STATUS_WORD
+./powertool.py TSP_CORE STATUS_WORD
+./powertool.py TSP_C2C STATUS_BYTE
+```
+
+### Direct Register Access
+Read any PMBus register by English name or hex address:
+```bash
+# Single reads using English command names (preferred)
+./powertool.py page 0 READ_VOUT READ 2
+./powertool.py page 1 STATUS_WORD READ 2
+./powertool.py page 0 VOUT_MODE READ 1
+./powertool.py page 0 MFR_VID_RES_R1 READ 2
+
+# Continuous logging using English command names
+./powertool.py page 0 READ_VOUT LOG 2     # Logs to CSV
+./powertool.py page 1 STATUS_WORD LOG 2   # Monitor status
+./powertool.py page 0 VOUT_MODE LOG 1     # Monitor mode changes
+
+# Using hex addresses (alternative)
+./powertool.py page 0 0x8B READ 2    # Single read
+./powertool.py page 0 0x8B LOG 2     # Continuous log
+./powertool.py page 0 8Bh READ 2     # Alternative hex format
 ```
 
 ### Write
 Write a PMBus register:
 ```bash
-# Write voltage command
-python3 Sugarloaf_I2C_ver2.py TSP_CORE VOUT_COMMAND --value 1.8
+# Set voltage command (requires voltage value)
+./powertool.py TSP_CORE VOUT_COMMAND 0.8
+./powertool.py TSP_C2C VOUT_COMMAND 0.75
 
 # Clear faults
-python3 Sugarloaf_I2C_ver2.py TSP_CORE CLEAR_FAULTS
-
-# Set page for multi-rail devices
-python3 Sugarloaf_I2C_ver2.py --addr 0x5C PAGE --value 1
+./powertool.py TSP_CORE CLEAR_FAULTS
+./powertool.py TSP_C2C CLEAR_FAULTS
 ```
 
 ### Monitor
-Continuously monitor multiple registers:
+Continuously monitor registers:
 ```bash
-# Monitor voltage and current
-python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT,READ_IOUT --monitor --interval 100
+# Monitor single command and log to CSV
+./powertool.py TSP_CORE READ_VOUT log
+./powertool.py TSP_C2C READ_IOUT log
 
-# Save to CSV with timestamps
-python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT,READ_IOUT,READ_TEMPERATURE_1 \
-    --csv --interval 100 --samples 1000
+# Monitor status registers
+./powertool.py TSP_CORE STATUS_WORD log
+./powertool.py TSP_C2C STATUS_BYTE log
 
-# Monitor both rails simultaneously
-python3 Sugarloaf_I2C_ver2.py TSP_CORE,TSP_C2C READ_VOUT,READ_IOUT \
-    --csv multi_rail.csv --interval 50
-
-# Monitor for specific duration
-python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT,READ_PIN \
-    --monitor --duration 60 --csv power_log.csv
+# Continuous logging mode (all rails)
+./powertool.py log
 ```
 
 ## PMBus Formats
@@ -93,7 +108,7 @@ python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT,READ_PIN \
 
 ## Configuration
 
-The tool includes built-in support for standard PMBus commands and MPS-specific registers. Key registers are defined in the PMBusDict within Sugarloaf_I2C_ver2.py:
+The tool includes built-in support for standard PMBus commands and MPS-specific registers. Key registers are defined in the PMBusDict within powertool.py:
 
 - Standard PMBus commands (0x00-0x97)
 - MFR-specific commands (0x67, 0xD1-0xD8)
@@ -140,32 +155,48 @@ Supported rails:
 
 ### Power Supply Monitoring
 ```bash
-# Monitor efficiency
-python3 Sugarloaf_I2C_ver2.py TSP_CORE \
-    READ_IIN,READ_PIN,READ_VOUT,READ_IOUT,READ_POUT \
-    --csv efficiency.csv --interval 250
+# Monitor voltage and current
+./powertool.py TSP_CORE READ_VOUT log
+./powertool.py TSP_C2C READ_IOUT log
+
+# Set specific voltages
+./powertool.py TSP_CORE VOUT_COMMAND 0.8
+./powertool.py TSP_C2C VOUT_COMMAND 0.75
 ```
 
-### Thermal Testing
+### Direct Register Analysis
 ```bash
-# Log temperature with peak detection
-python3 Sugarloaf_I2C_ver2.py TSP_CORE \
-    READ_TEMPERATURE_1,MFR_TEMP_PEAK \
-    --csv thermal.csv --monitor --duration 3600
+# Read configuration registers using English names
+./powertool.py page 0 MFR_VID_RES_R1 READ 2    # VID resolution settings
+./powertool.py page 0 VOUT_MODE READ 1         # Output voltage mode
+./powertool.py page 0 MFR_VR_CONFIG READ 2     # VR configuration
+
+# Continuous monitoring with CSV logging
+./powertool.py page 0 READ_VOUT LOG 2          # Log TSP_CORE voltage
+./powertool.py page 1 READ_VOUT LOG 2          # Log TSP_C2C voltage
+./powertool.py page 0 STATUS_WORD LOG 2        # Monitor TSP_CORE status
+./powertool.py page 1 STATUS_WORD LOG 2        # Monitor TSP_C2C status
 ```
 
 ### Fault Analysis
 ```bash
-# Fast status monitoring
-python3 Sugarloaf_I2C_ver2.py TSP_CORE \
-    STATUS_WORD,STATUS_VOUT,STATUS_IOUT,STATUS_TEMPERATURE \
-    --monitor --interval 10
+# Monitor status registers
+./powertool.py TSP_CORE STATUS_WORD log
+
+# Direct status register reads using English names
+./powertool.py page 0 STATUS_WORD READ 2       # Overall status
+./powertool.py page 0 STATUS_VOUT READ 1       # Voltage status
+./powertool.py page 0 STATUS_IOUT READ 1       # Current status
+./powertool.py page 0 STATUS_TEMPERATURE READ 1 # Temperature status
 ```
 
 ### Test All Commands
 ```bash
 # Run comprehensive test suite
-python3 test_all_pmbus_commands.py
+./test_all_pmbus_commands.py
+
+# Run single readback test
+./powertool.py test
 ```
 
 ## Signal Connections
@@ -199,7 +230,7 @@ import subprocess
 
 # Read voltage from TSP_CORE
 result = subprocess.run(
-    ['python3', 'Sugarloaf_I2C_ver2.py', 'TSP_CORE', 'READ_VOUT'],
+    ['python3', 'powertool.py', 'TSP_CORE', 'READ_VOUT'],
     capture_output=True, text=True
 )
 voltage = result.stdout.strip().split()[-1]  # Extract value
@@ -210,7 +241,7 @@ voltage = result.stdout.strip().split()[-1]  # Extract value
 # Test all commands on both rails
 for rail in TSP_CORE TSP_C2C; do
     for cmd in READ_VOUT READ_IOUT READ_TEMPERATURE_1; do
-        python3 Sugarloaf_I2C_ver2.py $rail $cmd
+        python3 powertool.py $rail $cmd
     done
 done
 ```

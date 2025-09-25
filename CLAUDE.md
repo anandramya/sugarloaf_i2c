@@ -1,10 +1,10 @@
-# CLAUDE.md - PMBus Tool Project Documentation
+# CLAUDE.md - PowerTool Project Documentation
 
 ## Project Overview
-PMBus monitoring and control tool for Total Phase Aardvark I²C adapters, specifically designed for Sugarloaf power management ICs. This tool provides high-speed PMBus telemetry logging, multi-device monitoring, and comprehensive command support.
+PowerTool - PMBus monitoring and control tool for Total Phase Aardvark I²C adapters, designed for power management ICs. This tool provides high-speed PMBus telemetry logging, multi-device monitoring, and comprehensive command support.
 
 ## Main Files
-- **Sugarloaf_I2C_ver2.py**: Core PMBus interface implementation with Aardvark adapter
+- **powertool.py**: Core PMBus interface implementation with Aardvark adapter
 - **test_all_pmbus_commands.py**: Comprehensive test suite for PMBus commands
 - **help.md**: User documentation and command reference
 - **README.md**: Project overview and quick start guide
@@ -40,25 +40,27 @@ PMBus monitoring and control tool for Total Phase Aardvark I²C adapters, specif
 ## Usage Examples
 ```bash
 # Basic voltage read
-python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT
+./powertool.py TSP_CORE READ_VOUT
 
-# Monitor multiple parameters with CSV logging
-python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT,READ_IOUT,READ_TEMPERATURE_1 --csv --interval 100
+# Direct register access with English commands
+./powertool.py page 0 READ_VOUT READ 2
+./powertool.py page 0 STATUS_WORD LOG 2
 
 # Test all commands on both rails
-python3 test_all_pmbus_commands.py
+./test_all_pmbus_commands.py
 ```
 
 ## Testing Commands
 ```bash
 # Run comprehensive PMBus command tests
-python3 test_all_pmbus_commands.py
+./test_all_pmbus_commands.py
 
 # Test specific rail
-python3 Sugarloaf_I2C_ver2.py TSP_CORE STATUS_WORD
+./powertool.py TSP_CORE STATUS_WORD
 
 # Continuous monitoring with data logging
-python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT --monitor --csv output.csv
+./powertool.py TSP_CORE READ_VOUT log
+./powertool.py page 0 READ_VOUT LOG 2
 ```
 
 ## Hardware Requirements
@@ -95,7 +97,7 @@ python3 Sugarloaf_I2C_ver2.py TSP_CORE READ_VOUT --monitor --csv output.csv
 ## Project Structure
 ```
 pmbustool/
-├── Sugarloaf_I2C_ver2.py    # Main PMBus interface
+├── powertool.py              # Main PMBus interface
 ├── test_all_pmbus_commands.py # Test suite
 ├── data/                     # CSV output directory
 ├── help.md                   # Extended documentation

@@ -242,7 +242,7 @@ The tool implements several optimizations for fast PMBus logging:
 ### Example: Fast Multi-Device Logger
 
 ```python
-from Sugarloaf_I2C_ver2 import AardvarkI2C
+from powertool import PowerToolI2C
 import csv
 import time
 import threading
@@ -250,7 +250,7 @@ from collections import deque
 
 class FastPMBusLogger:
     def __init__(self, devices, sample_rate_ms=10):
-        self.i2c = AardvarkI2C()
+        self.i2c = PowerToolI2C()
         self.devices = devices  # List of {'addr': 0x5C, 'name': 'VR1', 'page': 0}
         self.sample_rate = sample_rate_ms / 1000.0
         self.data_buffer = deque(maxlen=10000)

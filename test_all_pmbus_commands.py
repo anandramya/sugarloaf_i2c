@@ -34,7 +34,7 @@ COMMANDS = [
 
 def run_command(rail, command):
     """Execute a single PMBus command and return the result"""
-    cmd = ['python3', 'Sugarloaf_I2C_ver2.py', rail, command]
+    cmd = ['python3', 'powertool.py', rail, command]
 
     try:
         # Run the command with timeout
@@ -210,7 +210,7 @@ def test_continuous_logging():
         test_script = f"""
 import sys
 sys.path.insert(0, '/home/groq/pmbustool')
-from Sugarloaf_I2C_ver2 import continuous_single_command_logging
+from powertool import continuous_single_command_logging
 
 # Test with 3 second duration
 success = continuous_single_command_logging('{rail}', '{command}', duration_minutes=0.05, sample_rate_ms=500)
@@ -264,8 +264,8 @@ def main():
     print()
 
     # Check if we're in the right directory
-    if not os.path.exists('Sugarloaf_I2C_ver2.py'):
-        print("ERROR: Sugarloaf_I2C_ver2.py not found in current directory")
+    if not os.path.exists('powertool.py'):
+        print("ERROR: powertool.py not found in current directory")
         print("Please run this test from the pmbustool directory")
         sys.exit(1)
 
