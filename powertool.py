@@ -19,6 +19,7 @@ from aardvark_py import *
 PMBusDict = {
     # Standard PMBus Commands
     "PAGE": 0x00,
+    "OPERATION": 0x01,
     "CLEAR_FAULTS": 0x03,
     "VOUT_MODE": 0x20,
     "VOUT_COMMAND": 0x21,
@@ -488,12 +489,9 @@ class PowerToolI2C (object) :
                 7: 1.0/1024      # 1/1024V = 0.9765625mV
             }
 
-            # Special handling for TSP_CORE (page 0) which uses 0.25mV despite register showing code 7
-            if page == 0 and vid_res_data == 0xFFFF:
-                # TSP_CORE with uninitialized register uses 0.25mV
-                vid_step_mv = 0.25
-            elif vid_step_code == 7:
-                # TSP_C2C uses the actual 1V/1024 = 0.9765625mV
+            # Both TSP_CORE and TSP_C2C use the same VID step size
+            if vid_step_code == 7 or (page == 0 and vid_res_data == 0xFFFF):
+                # Both TSP_CORE and TSP_C2C use 1V/1024 = 0.9765625mV
                 vid_step_mv = 1000.0 / 1024  # 0.9765625mV
             else:
                 vid_step_mv = vid_step_table.get(vid_step_code, 0.9765625)  # Default to 1V/1024
@@ -520,6 +518,11 @@ class PowerToolI2C (object) :
         """
         try:
             print(f"Setting voltage for page {page}: {voltage}V")
+
+            # First step: Set page and OPERATION command to enable output (0x80)
+            print(f"  Setting page {page} and OPERATION command: 0x80 (enable output)")
+            self.i2c_write8PMBus(PMBusDict["PAGE"], page)
+            self.i2c_write8PMBus(PMBusDict["OPERATION"], 0x80)
 
             # Get VID_STEP resolution
             vid_step = self.Read_VID_Resolution(page)
@@ -1719,7 +1722,9 @@ Note: Add "log" as third argument to continuously log any command to CSV file
     parser.add_argument('extra_arg', nargs='?',
                        help='Optional: "READ" for hex read mode, or byte count (1 or 2)')
     parser.add_argument('byte_count', nargs='?',
-                       help='Optional: Number of bytes to read (1 or 2) for hex address mode')
+                       help='Optional: Number of bytes to read (1 or 2) for hex address mode, or value for WRITE mode')
+    parser.add_argument('write_bytes', nargs='?',
+                       help='Optional: Number of bytes for WRITE mode (1 or 2)')
 
     # Parse arguments
     args = parser.parse_args()
@@ -1868,20 +1873,49 @@ Note: Add "log" as third argument to continuously log any command to CSV file
                     hex_addr = int(args.log_mode)
                     addr_desc = f"0x{hex_addr:02X}"
 
-            # Check for READ or LOG keyword
-            if args.extra_arg.upper() not in ["READ", "LOG"]:
+            # Check for READ, LOG, or WRITE keyword
+            if args.extra_arg.upper() not in ["READ", "LOG", "WRITE"]:
                 # Maybe byte count is in extra_arg
                 if args.extra_arg in ['1', '2']:
                     byte_count = int(args.extra_arg)
                     mode = "READ"
                 else:
-                    print(f"Error: Expected 'READ', 'LOG', or byte count, got '{args.extra_arg}'")
+                    print(f"Error: Expected 'READ', 'LOG', 'WRITE', or byte count, got '{args.extra_arg}'")
                     sys.exit(1)
             else:
-                # Mode is read or log
+                # Mode is read, log, or write
                 mode = args.extra_arg.upper()
-                # Byte count should be in next argument
-                byte_count = int(args.byte_count) if args.byte_count else 2
+                # For READ/LOG: Byte count should be in next argument
+                # For WRITE: Value should be in next argument, byte count is after that
+                if mode in ["READ", "LOG"]:
+                    byte_count = int(args.byte_count) if args.byte_count else 2
+                elif mode == "WRITE":
+                    # For WRITE, we expect: page X 0xYY WRITE 0xVALUE [BYTES]
+                    if not args.byte_count:
+                        print("Error: WRITE command requires value and byte count")
+                        print("Usage: ./powertool.py page [0/1] [ADDRESS] WRITE [VALUE] [1/2]")
+                        sys.exit(1)
+
+                    # Parse write value from args.byte_count (which contains the value)
+                    if args.byte_count.lower().startswith('0x'):
+                        write_value = int(args.byte_count, 16)
+                    elif args.byte_count.lower().endswith('h'):
+                        write_value = int(args.byte_count[:-1], 16)
+                    else:
+                        write_value = int(args.byte_count, 16)
+
+                    # Check if there's an additional argument for byte count
+                    if args.write_bytes:
+                        try:
+                            byte_count = int(args.write_bytes)
+                            if byte_count not in [1, 2]:
+                                raise ValueError("Byte count must be 1 or 2")
+                        except ValueError:
+                            # Auto-determine byte count based on value
+                            byte_count = 1 if write_value <= 0xFF else 2
+                    else:
+                        # Auto-determine byte count based on value
+                        byte_count = 1 if write_value <= 0xFF else 2
 
             if mode == "READ":
                 # Single read mode
@@ -1911,11 +1945,47 @@ Note: Add "log" as third argument to continuously log any command to CSV file
                 success = continuous_register_logging(page, hex_addr, addr_desc, byte_count)
                 sys.exit(0 if success else 1)
 
+            elif mode == "WRITE":
+                # Write mode
+                print(f"Writing to Page {page}, Address {addr_desc}")
+                print(f"Value: 0x{write_value:0{byte_count*2}X} (decimal: {write_value}, {byte_count} byte(s))")
+                print("="*50)
+
+                # Initialize I2C
+                powertool = PowerToolI2C()
+
+                # Set page
+                powertool.i2c_write8PMBus(PMBusDict["PAGE"], page)
+
+                # Write data
+                if byte_count == 1:
+                    powertool.i2c_write8PMBus(hex_addr, write_value)
+                    print(f"✓ Written byte value 0x{write_value:02X} to address 0x{hex_addr:02X}")
+                else:
+                    powertool.i2c_write16PMBus(page, hex_addr, write_value)
+                    print(f"✓ Written word value 0x{write_value:04X} to address 0x{hex_addr:02X}")
+
+                # Read back to verify
+                if byte_count == 1:
+                    readback = powertool.i2c_read8PMBus(page, hex_addr)
+                    print(f"Readback verification: 0x{readback:02X}")
+                    if readback == write_value:
+                        print("✓ Write verified successfully")
+                    else:
+                        print("⚠ Write verification failed!")
+                else:
+                    readback = powertool.i2c_read16PMBus(page, hex_addr)
+                    print(f"Readback verification: 0x{readback:04X}")
+                    if readback == write_value:
+                        print("✓ Write verified successfully")
+                    else:
+                        print("⚠ Write verification failed!")
+
             sys.exit(0)
 
         except (ValueError, KeyError) as e:
             print(f"Error parsing arguments: {e}")
-            print("Usage: ./powertool.py page [0/1] [ADDRESS|COMMAND] [READ|LOG] [1/2]")
+            print("Usage: ./powertool.py page [0/1] [ADDRESS|COMMAND] [READ|LOG|WRITE] [1/2|VALUE] [BYTES]")
             print("")
             print("ADDRESS can be:")
             print("  - Hex address: 0x8B, 8Bh, or 8B")
@@ -1924,12 +1994,15 @@ Note: Add "log" as third argument to continuously log any command to CSV file
             print("MODE can be:")
             print("  - READ: Single read and display")
             print("  - LOG: Continuous logging to CSV file")
+            print("  - WRITE: Write value to register")
             print("")
             print("Examples:")
             print("  ./powertool.py page 0 READ_VOUT READ 2")
             print("  ./powertool.py page 0 READ_VOUT LOG 2")
             print("  ./powertool.py page 0 0x8B READ 2")
             print("  ./powertool.py page 1 STATUS_WORD LOG 2")
+            print("  ./powertool.py page 0 0x21 WRITE 0x02BC 2")
+            print("  ./powertool.py page 0 VOUT_COMMAND WRITE 0x0C00")
             sys.exit(1)
         except Exception as e:
             print(f"Error: {e}")
