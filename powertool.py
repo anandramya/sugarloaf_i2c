@@ -5,6 +5,8 @@ PMBus Rail Monitor for MP29816-C Controller
 Supports direct register access, monitoring, and voltage control
 """
 
+# Note: This tool provides comprehensive PMBus fault limit configuration capabilities
+
 import time
 import sys
 import math
