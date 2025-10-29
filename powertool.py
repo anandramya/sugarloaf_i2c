@@ -3,6 +3,7 @@
 """
 PMBus Rail Monitor for MP29816-C Controller
 Supports direct register access, monitoring, and voltage control
+Uses Serial I2C driver for remote I2C access via STM32MP25
 """
 
 # Note: This tool provides comprehensive PMBus fault limit configuration capabilities
@@ -14,8 +15,22 @@ import csv
 import datetime
 import os
 import argparse
+import subprocess
 
-from aardvark_py import *
+# Import serial I2C driver with error handling
+try:
+    from serial_i2c_driver import SerialI2CDriver
+except ImportError:
+    print("ERROR: serial_i2c_driver module not found")
+    print("Installing required module...")
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "pyserial"])
+        from serial_i2c_driver import SerialI2CDriver
+        print("✓ Module installed successfully")
+    except Exception as e:
+        print(f"Failed to install required module: {e}")
+        print("Please install manually: pip3 install pyserial")
+        sys.exit(1)
 
 # PMBus register definitions
 PMBusDict = {
@@ -34,7 +49,8 @@ PMBusDict = {
     "STATUS_MFR_SPECIFIC": 0x80,
     "READ_VOUT": 0x8B,
     "READ_IOUT": 0x8C,
-    "READ_TEMPERATURE_1": 0x8D,
+    "READ_TEMP": 0x8D,
+    "READ_DIE_TEMP": 0x8E,
     "READ_DUTY": 0x94,
     "READ_PIN": 0x97,
     "READ_POUT": 0x96,
@@ -74,193 +90,226 @@ PMBusDict = {
     "Phase_active": 0x0E00
 }
 
-SLAVE_ADDR 	= 0x5C
-I2C_BITRATE = 400 # kHz
+SLAVE_ADDR = 0x5C
+I2C_BUS = 0  # PMBus device is on I2C bus 0
+SERIAL_PORT = "/dev/ttyUSB0"
+SERIAL_BAUD = 115200
+SERIAL_PASSWORD = "root"
 ENDIAN = 0 # Little endian; 1 = Big endian
+
+# Ensure data directory exists
+DATA_DIR = "data"
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
+    print(f"✓ Created {DATA_DIR}/ directory for CSV logging")
 
 
 class PowerToolI2C (object) :
 
     def __init__(self):
 
-        self.aardvark = self.aardvark_setup()
+        self.driver = self.serial_i2c_setup()
+        self.authenticate()
+        self.I2Cinit()
 
 
-    def aardvark_setup(self):
+    def serial_i2c_setup(self):
+        """Initialize serial I2C driver connection"""
+        try:
+            driver = SerialI2CDriver(
+                port=SERIAL_PORT,
+                baudrate=SERIAL_BAUD,
+                timeout=3.0
+            )
+            return driver
+        except Exception as e:
+            print(f'ERROR: Could not connect to serial I2C driver: {e}')
+            sys.exit(1)
 
-        # Number of aardvark devices attached
-        numAardvark = aa_find_devices(1)[0]
+    def authenticate(self):
+        """Wait for serial device to be ready and clear any buffered data"""
+        try:
+            # Wait for device to be ready
+            time.sleep(0.5)
+            # Clear any buffered input/output - this removes login prompts, command echoes, etc.
+            self.driver.serial_conn.reset_input_buffer()
+            self.driver.serial_conn.reset_output_buffer()
+            # Additional wait to ensure shell is ready
+            time.sleep(0.2)
+        except Exception as e:
+            print(f'ERROR: Serial initialization failed: {e}')
+            sys.exit(1)
 
-        if numAardvark == 0:
-            print('ERROR: Could not find an aardvark device.')
-            sys.exit(0)
-        elif numAardvark > 1:
-            print(""" WARNING:  Multiple aardvark devices found. It is recommended
-                                        to plug only the device you expect to use with
-                                        this script """)
-        handle = aa_open(0)
-        aa_i2c_free_bus(handle)
-        aa_i2c_bitrate(handle, I2C_BITRATE)
-        aa_i2c_pullup(handle, AA_I2C_PULLUP_BOTH)
-        aa_configure(handle, AA_CONFIG_SPI_I2C)
+    def I2Cinit(self):
+        """Initialize MCU I2C settings by setting GPIO PB1=1 (only once)"""
+        try:
+            # Wait for shell to be fully ready after buffer clear
+            time.sleep(0.3)
 
-        return handle
+            # Send newline first to get a fresh prompt
+            self.driver.serial_conn.write(b'\n')
+            self.driver.serial_conn.flush()
+            time.sleep(0.1)
+            self.driver.serial_conn.reset_input_buffer()
+
+            # Check if gpioset is already running
+            self.driver.serial_conn.write(b'pgrep -f "gpioset PB1=1"\n')
+            self.driver.serial_conn.flush()
+            time.sleep(0.3)
+
+            response_data = b''
+            if self.driver.serial_conn.in_waiting > 0:
+                response_data = self.driver.serial_conn.read(self.driver.serial_conn.in_waiting)
+
+            self.driver.serial_conn.reset_input_buffer()
+
+            # If pgrep returned a PID (number), gpioset is already running
+            if response_data and any(c.isdigit() for c in response_data.decode('utf-8', errors='ignore')):
+                # Extract just the digits
+                response_str = response_data.decode('utf-8', errors='ignore')
+                import re
+                pids = re.findall(r'\d+', response_str)
+                if pids and int(pids[0]) > 100:  # Valid PID
+                    print("✓ GPIO PB1 already active (I2C initialized)")
+                    return "gpioset already running"
+
+            # GPIO not set, start it in background
+            self.driver.serial_conn.write(b'gpioset PB1=1 &\n')
+            self.driver.serial_conn.flush()
+            time.sleep(0.4)
+
+            response_data = b''
+            if self.driver.serial_conn.in_waiting > 0:
+                response_data = self.driver.serial_conn.read(self.driver.serial_conn.in_waiting)
+
+            self.driver.serial_conn.reset_input_buffer()
+
+            # Check if gpioset started successfully
+            if b'[' in response_data and b']' in response_data:
+                print("✓ GPIO PB1 set to 1 (I2C initialized)")
+            elif b'busy' in response_data.lower():
+                print("✓ GPIO PB1 already active (I2C initialized)")
+            else:
+                print("⚠ Warning: GPIO PB1 may not have started correctly")
+
+            # Wait for I2C bus to stabilize
+            time.sleep(0.2)
+
+            return "gpioset started"
+        except Exception as e:
+            print(f'ERROR: I2C initialization (GPIO setup) failed: {e}')
+            sys.exit(1)
 
 
-    def i2c_write16(self, addr1,addr2, data):
-        i2c_reg = [0] * 6	# 5 bytes for the address and 4 for data
-
-        # Split the 32-bit address into 5 bytes
-        address1 = self.setIndirectDataBuffer2(addr1)
-
-        address2 = self.setIndirectDataBuffer2(addr2)
-        # print 'Address buffer is %s' % addressBuf
-        dataBuf = self.setIndirectDataBuffer2(data)
-        # print 'Data buffer is %s' % dataBuf
-
-        i2c_reg = address1+ address2 + dataBuf
-        # print 'i2c_reg is %s' % i2c_reg
-
-        i2c_array = array('B', i2c_reg)
-
-        resp = 0
-
-        # Write address to the salve
-        while resp == 0:
-            resp = aa_i2c_write(self.aardvark, SLAVE_ADDR, AA_I2C_NO_FLAGS, i2c_array)
+    def i2c_write16(self, addr1, addr2, data):
+        """Write to extended register using MFR_REG_ACCESS (for phase currents, etc.)"""
+        # This uses MFR_REG_ACCESS (0xD8) for extended register access
+        # First write the extended address to MFR_REG_ACCESS
+        page = 0  # Typically page 0 for extended access
+        self.i2c_write16PMBus(page, PMBusDict["MFR_REG_ACCESS"], addr2)
+        # Then write the data
+        self.i2c_write16PMBus(page, addr1, data)
 
 
-    def i2c_write16PMBus(self,page, reg_addr, data):
-
-
+    def i2c_write16PMBus(self, page, reg_addr, data):
+        """Write a 16-bit word to PMBus register"""
+        # Set page first
         self.i2c_write8PMBus(PMBusDict["PAGE"], page)
+        time.sleep(0.01)  # Small delay after page write
 
-        i2c_reg = [0] * 3	# 5 bytes for the address and 4 for data
-
-        # Split the 32-bit address into 5 bytes
-        addressBuf = self.setIndirectDataBuffer(reg_addr)
-        # print 'Address buffer is %s' % addressBuf
-        dataBuf = self.setIndirectDataBuffer2(data)
-        # print 'Data buffer is %s' % dataBuf
-
-        i2c_reg = addressBuf + dataBuf
-        # print 'i2c_reg is %s' % i2c_reg
-
-        i2c_array = array('B', i2c_reg)
-        resp = 0
-
-        # Write address to the salve
-        while resp == 0:
-            resp = aa_i2c_write(self.aardvark, SLAVE_ADDR, AA_I2C_NO_FLAGS, i2c_array)
+        # Write word using serial driver
+        response = self.driver.i2cset(
+            bus=I2C_BUS,
+            chip_addr=SLAVE_ADDR,
+            data_addr=reg_addr,
+            values=data,
+            mode='w',
+            assume_yes=True
+        )
+        time.sleep(0.01)  # Small delay after write
 
     def i2c_write8PMBus(self, reg_addr, data):
-
-        i2c_reg = [0] * 2	# 5 bytes for the address and 4 for data
-
-        # Split the 32-bit address into 5 bytes
-        addressBuf = self.setIndirectDataBuffer(reg_addr)
-        # print 'Address buffer is %s' % addressBuf
-        dataBuf = self.setIndirectDataBuffer(data)
-        # print 'Data buffer is %s' % dataBuf
-
-        i2c_reg = addressBuf + dataBuf
-        # print 'i2c_reg is %s' % i2c_reg
-
-        i2c_array = array('B', i2c_reg)
-
-        resp = 0
-
-        # Write address to the salve
-        while resp == 0:
-            resp = aa_i2c_write(self.aardvark, SLAVE_ADDR, AA_I2C_NO_FLAGS, i2c_array)
+        """Write a single byte to PMBus register"""
+        # Write byte using serial driver
+        response = self.driver.i2cset(
+            bus=I2C_BUS,
+            chip_addr=SLAVE_ADDR,
+            data_addr=reg_addr,
+            values=data,
+            mode='b',
+            assume_yes=True
+        )
+        time.sleep(0.05)  # Delay after write to allow command to complete
 
     def i2c_read8PMBus(self, page, reg_addr):
         """Read a single byte from PMBus register"""
+        # Set page first
         self.i2c_write8PMBus(PMBusDict["PAGE"], page)
+        time.sleep(0.01)  # Small delay after page write
 
-        # Create register address buffer
-        addressBuf = self.setIndirectDataBuffer(reg_addr)
-        i2c_reg = array('B', addressBuf)
+        # Read byte using serial driver
+        response = self.driver.i2cget(
+            bus=I2C_BUS,
+            chip_addr=SLAVE_ADDR,
+            data_addr=reg_addr,
+            mode='b',
+            assume_yes=True
+        )
 
-        # Read single byte
-        (count, data1, data_read, data2) = aa_i2c_write_read(self.aardvark, SLAVE_ADDR, AA_I2C_NO_FLAGS, i2c_reg, 1)
-
-        # Return the single byte
-        if len(data_read) > 0:
-            return data_read[0]
+        # Parse response
+        value = self.driver.parse_i2cget_response(response)
+        if value is not None:
+            return value
         else:
             raise Exception(f"Failed to read from register 0x{reg_addr:02X}")
 
     def i2c_writePMBus_cmd_only(self, page, reg_addr):
-
-
+        """Send a PMBus command with no data (command-only mode)"""
+        # Set page first
         self.i2c_write8PMBus(PMBusDict["PAGE"], page)
+        time.sleep(0.01)
 
-        i2c_reg = [0] * 2	# 5 bytes for the address and 4 for data
+        # Send command with no value using mode 'c' (byte no value)
+        response = self.driver.i2cset(
+            bus=I2C_BUS,
+            chip_addr=SLAVE_ADDR,
+            data_addr=reg_addr,
+            values=None,
+            mode='c',
+            assume_yes=True
+        )
+        time.sleep(0.01)
 
-        # Split the 32-bit address into 5 bytes
-        addressBuf = self.setIndirectDataBuffer(reg_addr)
-        # print 'Address buffer is %s' % addressBuf
-
-        i2c_reg = addressBuf
-        # print 'i2c_reg is %s' % i2c_reg
-
-        i2c_array = array('B', i2c_reg)
-
-        resp = 0
-
-        # Write address to the salve
-        while resp == 0:
-            resp = aa_i2c_write(self.aardvark, SLAVE_ADDR, AA_I2C_NO_FLAGS, i2c_array)
-
-    def i2c_read16(self, addr1 , addr2):
-
-        # Split the 32-bit address into 5 bytes
-        address1 = self.setIndirectDataBuffer(addr1)
-
-        address2 = self.setIndirectDataBuffer2(addr2)
-
-        i2c_reg = address1 + address2
-
-        i2c_reg = array('B',i2c_reg)
-
-        count= 0
-
-        (count, data1, data_read, data2) = aa_i2c_write_read(self.aardvark, SLAVE_ADDR, AA_I2C_NO_FLAGS, i2c_reg, 2)
-
-        #print data1
-        #print data_read
-        #print data2
-
-        # return data converted to big endian format
-        return self.byteArrayToLittleEndian(data_read.tolist())
+    def i2c_read16(self, addr1, addr2):
+        """Read from extended register using MFR_REG_ACCESS (for phase currents, etc.)"""
+        # This uses MFR_REG_ACCESS (0xD8) for extended register access
+        # First write the extended address to MFR_REG_ACCESS
+        page = 0  # Typically page 0 for extended access
+        self.i2c_write16PMBus(page, PMBusDict["MFR_REG_ACCESS"], addr2)
+        # Then read the data
+        return self.i2c_read16PMBus(page, addr1)
 
     def i2c_read16PMBus(self, page, reg_addr):
-
+        """Read a 16-bit word from PMBus register"""
+        # Set page first
         self.i2c_write8PMBus(PMBusDict["PAGE"], page)
+        time.sleep(0.1)  # Delay after page write
 
-        # Split the 32-bit address into 5 bytes
-        addressBuf = self.setIndirectDataBuffer(reg_addr)
+        # Read word using serial driver
+        response = self.driver.i2cget(
+            bus=I2C_BUS,
+            chip_addr=SLAVE_ADDR,
+            data_addr=reg_addr,
+            mode='w',
+            assume_yes=True
+        )
 
-        i2c_reg = array('B', addressBuf)
-
-        resp = 0
-
-        # Write address to the salve
-
-        #while resp == 0:
-            #resp = aa_i2c_write(self.aardvark, SLAVE_ADDR, AA_I2C_NO_FLAGS, i2c_reg)
-
-        # Read data back
-        count = 0
-
-        (count,data1,data_read, data2) = aa_i2c_write_read(self.aardvark, SLAVE_ADDR, AA_I2C_NO_FLAGS, i2c_reg, 2)
-
-        #print data1
-        #print data2
-        #print data_read
-        # return data converted to big endian format
-        return self.byteArrayToLittleEndian(data_read.tolist())
+        # Parse response
+        value = self.driver.parse_i2cget_response(response)
+        if value is not None:
+            return value
+        else:
+            raise Exception(f"Failed to read word from register 0x{reg_addr:02X}")
 
        # Assume 32-bit data
     def setIndirectDataBuffer4(self, data):
@@ -412,7 +461,7 @@ class PowerToolI2C (object) :
         # Linear16 format: mantissa * 2^exponent
         vout = data * math.pow(2, exponent)
 
-        print("Vout=" , vout)
+        # print("Vout=" , vout)  # Commented out for logging performance
         return vout
 
     def Read_VOUT_MODE(self, page):
@@ -667,7 +716,7 @@ class PowerToolI2C (object) :
 
     def Read_Temp(self, page):
 
-        data = self.i2c_read16PMBus(page, PMBusDict["READ_TEMPERATURE_1"])
+        data = self.i2c_read16PMBus(page, PMBusDict["READ_TEMP"])
 
         exponent = data >> 11
         mantissa = data & 0x7ff
@@ -675,6 +724,15 @@ class PowerToolI2C (object) :
         power = self.twos_comp(exponent, 5)
 
         return mantissa * math.pow(2, power)
+
+    def Read_Die_Temp(self, page):
+        """
+        Read die temperature - 1°C per LSB (raw value = temperature in °C)
+        """
+        data = self.i2c_read16PMBus(page, PMBusDict["READ_DIE_TEMP"])
+
+        # Raw value directly represents temperature (1°C per LSB)
+        return float(data)
 
     def Read_Phase_Currents(self):
 
@@ -988,11 +1046,8 @@ class PowerToolI2C (object) :
         # Generate default filename if not provided
         if csv_filename is None:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            # Ensure data directory exists
-            data_dir = "data"
-            if not os.path.exists(data_dir):
-                os.makedirs(data_dir)
-            csv_filename = os.path.join(data_dir, f"pmbus_log_{timestamp}.csv")
+            # Use global DATA_DIR (already created at startup)
+            csv_filename = os.path.join(DATA_DIR, f"pmbus_log_{timestamp}.csv")
 
         # Calculate timing parameters
         sample_interval = sample_rate_ms / 1000.0  # Convert to seconds
@@ -1186,13 +1241,15 @@ def continuous_single_command_logging(rail, command, duration_minutes=2, sample_
     command_mapping = {
         'READ_VOUT': lambda powertool, p: powertool.Read_Vout(p),
         'READ_IOUT': lambda powertool, p: powertool.Read_Iout(p),
-        'READ_TEMPERATURE_1': lambda powertool, p: powertool.Read_Temp(p),
+        'READ_TEMP': lambda powertool, p: powertool.Read_Temp(p),
+        'READ_DIE_TEMP': lambda powertool, p: powertool.Read_Die_Temp(p),
         'READ_DUTY': lambda powertool, p: powertool.Read_Duty(p),
         'READ_PIN': lambda powertool, p: powertool.Read_PIN(p),
         'READ_POUT': lambda powertool, p: powertool.Read_POUT(p),
         'READ_IIN': lambda powertool, p: powertool.Read_IIN(p),
         'STATUS_BYTE': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_BYTE"]) & 0xFF,
         'STATUS_WORD': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_WORD"]),
+        'READ_STATUS': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_WORD"]),  # Alias for STATUS_WORD
         'STATUS_VOUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_VOUT"]) & 0xFF,
         'STATUS_IOUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_IOUT"]) & 0xFF,
         'STATUS_INPUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_INPUT"]) & 0xFF,
@@ -1215,7 +1272,8 @@ def continuous_single_command_logging(rail, command, duration_minutes=2, sample_
         'READ_IOUT': 'A',
         'READ_IIN': 'A',
         'MFR_IOUT_PEAK': 'A',
-        'READ_TEMPERATURE_1': '°C',
+        'READ_TEMP': '°C',
+        'READ_DIE_TEMP': '°C',
         'MFR_TEMP_PEAK': '°C',
         'READ_PIN': 'W',
         'READ_POUT': 'W',
@@ -1233,11 +1291,8 @@ def continuous_single_command_logging(rail, command, duration_minutes=2, sample_
 
     # Generate CSV filename
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    # Ensure data directory exists
-    data_dir = "data"
-    if not os.path.exists(data_dir):
-        os.makedirs(data_dir)
-    csv_filename = os.path.join(data_dir, f"{rail}_{command}_{timestamp}.csv")
+    # Use global DATA_DIR (already created at startup)
+    csv_filename = os.path.join(DATA_DIR, f"{rail}_{command}_{timestamp}.csv")
 
     # Calculate timing parameters
     sample_interval = sample_rate_ms / 1000.0  # Convert to seconds
@@ -1262,7 +1317,7 @@ def continuous_single_command_logging(rail, command, duration_minutes=2, sample_
 
     try:
         # Initialize I2C connection once
-        print("Initializing I2C connection...")
+        print("Initializing Serial connection...")
         powertool = PowerToolI2C()
         print("I2C connection successful")
         print()
@@ -1295,7 +1350,7 @@ def continuous_single_command_logging(rail, command, duration_minutes=2, sample_
                         value_str = f"{result:.6f}"
                     elif command in ['READ_IOUT', 'READ_IIN', 'MFR_IOUT_PEAK']:
                         value_str = f"{result:.3f}"
-                    elif command in ['READ_TEMPERATURE_1', 'MFR_TEMP_PEAK']:
+                    elif command in ['READ_TEMP', 'READ_DIE_TEMP', 'MFR_TEMP_PEAK']:
                         value_str = f"{result:.2f}"
                     elif command in ['READ_PIN', 'READ_POUT']:
                         value_str = f"{result:.3f}"
@@ -1315,13 +1370,11 @@ def continuous_single_command_logging(rail, command, duration_minutes=2, sample_
 
                     sample_count += 1
 
-                    # Progress indicator every 50 samples
-                    if sample_count % 50 == 0:
-                        progress = (current_time / total_duration) * 100
-                        print(f"Progress: {sample_count:4d}/{total_samples} samples ({progress:5.1f}%) - "
-                              f"{rail} {command}: {value_str} {units}")
+                    # Display current reading
+                    print(f"Sample {sample_count:4d}: {value_str} {units} @ {current_time:.3f}s")
 
-                        # Flush to ensure data is written
+                    # Flush to CSV every 50 samples to ensure data is written
+                    if sample_count % 50 == 0:
                         csvfile.flush()
 
                 except Exception as e:
@@ -1338,7 +1391,7 @@ def continuous_single_command_logging(rail, command, duration_minutes=2, sample_
                 if sleep_time > 0:
                     time.sleep(sleep_time)
                 elif sleep_time < -0.001:  # Warn if we're running behind
-                    print(f"Warning: Sample {sample_count} took {loop_time*1000:.1f}ms (target: {sample_rate_ms}ms)")
+                    print(f"Sample {sample_count} took {loop_time*1000:.1f}ms (target: {sample_rate_ms}ms)")
 
     except KeyboardInterrupt:
         print("\nLogging interrupted by user")
@@ -1363,6 +1416,200 @@ def continuous_single_command_logging(rail, command, duration_minutes=2, sample_
 
     return True
 
+def continuous_multi_command_logging(rail, commands, duration_minutes=2, sample_rate_ms=100):
+    """
+    Continuously log multiple PMBus commands from a specific rail to CSV
+
+    Args:
+        rail: Rail to monitor (TSP_CORE or TSP_C2C)
+        commands: List of PMBus commands to log
+        duration_minutes: Duration to log in minutes (default: 2)
+        sample_rate_ms: Sample interval in milliseconds (default: 100ms)
+    """
+
+    # Rail mapping
+    rail_mapping = {
+        'TSP_CORE': 0,  # Rail0 - Page 0
+        'TSP_C2C': 1   # Rail1 - Page 1
+    }
+
+    if rail not in rail_mapping:
+        print(f"Error: Invalid rail '{rail}'. Valid options: TSP_CORE, TSP_C2C")
+        return False
+
+    page = rail_mapping[rail]
+
+    # Command mapping to available methods
+    command_mapping = {
+        'READ_VOUT': lambda powertool, p: powertool.Read_Vout(p),
+        'READ_IOUT': lambda powertool, p: powertool.Read_Iout(p),
+        'READ_TEMP': lambda powertool, p: powertool.Read_Temp(p),
+        'READ_DIE_TEMP': lambda powertool, p: powertool.Read_Die_Temp(p),
+        'READ_DUTY': lambda powertool, p: powertool.Read_Duty(p),
+        'READ_PIN': lambda powertool, p: powertool.Read_PIN(p),
+        'READ_POUT': lambda powertool, p: powertool.Read_POUT(p),
+        'READ_IIN': lambda powertool, p: powertool.Read_IIN(p),
+        'STATUS_BYTE': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_BYTE"]) & 0xFF,
+        'STATUS_WORD': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_WORD"]),
+        'READ_STATUS': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_WORD"]),  # Alias
+        'STATUS_VOUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_VOUT"]) & 0xFF,
+        'STATUS_IOUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_IOUT"]) & 0xFF,
+        'STATUS_INPUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_INPUT"]) & 0xFF,
+        'STATUS_TEMPERATURE': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_TEMPERATURE"]) & 0xFF,
+        'VOUT_MODE': lambda powertool, p: powertool.Read_VOUT_MODE(p),
+        'MFR_IOUT_PEAK': lambda powertool, p: powertool.Read_IOUT_Peak(p),
+        'MFR_TEMP_PEAK': lambda powertool, p: powertool.Read_Peak_Temp(p)
+    }
+
+    # Validate all commands
+    invalid_commands = [cmd for cmd in commands if cmd not in command_mapping]
+    if invalid_commands:
+        print(f"Error: Invalid command(s): {', '.join(invalid_commands)}")
+        print("Available commands:")
+        for cmd in sorted(command_mapping.keys()):
+            print(f"  - {cmd}")
+        return False
+
+    # Register mapping for raw value display
+    register_mapping = {
+        'READ_VOUT': PMBusDict["READ_VOUT"],
+        'READ_IOUT': PMBusDict["READ_IOUT"],
+        'READ_IIN': PMBusDict["READ_IIN"],
+        'READ_TEMP': PMBusDict["READ_TEMP"],
+        'READ_DIE_TEMP': PMBusDict["READ_DIE_TEMP"],
+        'READ_PIN': PMBusDict["READ_PIN"],
+        'READ_POUT': PMBusDict["READ_POUT"],
+        'READ_DUTY': PMBusDict["READ_DUTY"],
+        'STATUS_BYTE': PMBusDict["STATUS_BYTE"],
+        'STATUS_WORD': PMBusDict["STATUS_WORD"],
+        'READ_STATUS': PMBusDict["STATUS_WORD"],
+        'STATUS_VOUT': PMBusDict["STATUS_VOUT"],
+        'STATUS_IOUT': PMBusDict["STATUS_IOUT"],
+        'STATUS_INPUT': PMBusDict["STATUS_INPUT"],
+        'STATUS_TEMPERATURE': PMBusDict["STATUS_TEMPERATURE"],
+        'VOUT_MODE': PMBusDict["VOUT_MODE"],
+        'MFR_IOUT_PEAK': PMBusDict["MFR_IOUT_PEAK"],
+        'MFR_TEMP_PEAK': PMBusDict["MFR_TEMP_PEAK"]
+    }
+
+    # Generate CSV filename
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Create descriptive filename with command list
+    commands_str = "_".join(commands[:3])  # Use first 3 commands in filename
+    if len(commands) > 3:
+        commands_str += "_etc"
+    csv_filename = os.path.join(DATA_DIR, f"{rail}_{commands_str}_{timestamp}.csv")
+
+    # Calculate timing parameters
+    sample_interval = sample_rate_ms / 1000.0
+    total_duration = duration_minutes * 60.0
+    total_samples = int(total_duration / sample_interval)
+
+    print(f"Starting continuous multi-command logging from {rail}...")
+    print(f"Commands: {', '.join(commands)}")
+    print(f"Duration: {duration_minutes} minutes ({total_duration:.1f} seconds)")
+    print(f"Sample rate: {sample_rate_ms}ms ({1000/sample_rate_ms:.1f} samples/sec)")
+    print(f"Expected samples: {total_samples}")
+    print(f"Output file: {csv_filename}")
+    print("-" * 70)
+
+    try:
+        # Initialize I2C connection
+        powertool = PowerToolI2C()
+
+        # Prepare CSV headers (optimized: only value, no raw to reduce I2C reads)
+        headers = ['timestamp', 'sample_num']
+        for cmd in commands:
+            headers.append(f'{cmd}')
+
+        # Open CSV file for writing
+        start_time = time.time()
+        sample_count = 0
+        error_count = 0
+
+        with open(csv_filename, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(headers)
+
+            print("Logging started... Press Ctrl+C to stop early")
+
+            while True:
+                loop_start = time.time()
+                current_time = loop_start - start_time
+
+                # Check if duration exceeded
+                if current_time >= total_duration:
+                    break
+
+                try:
+                    # Prepare row data
+                    row = [f"{current_time:.3f}", sample_count + 1]
+
+                    # Execute all commands
+                    for command in commands:
+                        try:
+                            # Get the calculated result (reads register once)
+                            result = command_mapping[command](powertool, page)
+
+                            # Format based on command type (skip redundant raw reads for speed)
+                            if command.startswith('STATUS') or command == 'READ_STATUS':
+                                if command in ['STATUS_WORD', 'READ_STATUS']:
+                                    row.append(f"0x{result:04X}")
+                                else:
+                                    row.append(f"0x{result:02X}")
+                            else:
+                                row.append(f"{result:.6f}" if command == 'READ_VOUT' else f"{result:.3f}")
+
+                        except Exception as e:
+                            row.append("ERROR")
+                            error_count += 1
+
+                    writer.writerow(row)
+                    sample_count += 1
+
+                    # Progress indicator every 10 samples
+                    if sample_count % 10 == 0:
+                        progress = (current_time / total_duration) * 100
+                        # Build progress string showing all command values
+                        values_str = ", ".join([f"{cmd}={row[2+i]}" for i, cmd in enumerate(commands) if len(row) > 2+i])
+                        print(f"[{sample_count:4d}/{total_samples}] {progress:5.1f}% - {values_str}")
+                        csvfile.flush()
+
+                except KeyboardInterrupt:
+                    print("\n\nLogging interrupted by user!")
+                    break
+                except Exception as e:
+                    error_count += 1
+                    print(f"Error at sample {sample_count + 1}: {e}")
+                    if error_count > 10:
+                        print("Too many errors, stopping...")
+                        break
+
+                # Sleep for remaining time to maintain sample rate
+                elapsed = time.time() - loop_start
+                sleep_time = sample_interval - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+
+        # Print summary
+        actual_duration = time.time() - start_time
+        actual_rate = sample_count / actual_duration if actual_duration > 0 else 0
+
+        print("-" * 70)
+        print(f"Logging completed!")
+        print(f"Samples collected: {sample_count}")
+        print(f"Actual duration: {actual_duration:.1f} seconds")
+        print(f"Actual sample rate: {actual_rate:.1f} samples/sec")
+        print(f"Errors: {error_count}")
+        print(f"Data saved to: {csv_filename}")
+
+        return True
+
+    except Exception as e:
+        print(f"Error during multi-command logging: {e}")
+        return False
+
 def execute_single_command(rail, command):
     """Execute a single PMBus command on specified rail"""
 
@@ -1382,13 +1629,15 @@ def execute_single_command(rail, command):
     command_mapping = {
         'READ_VOUT': lambda powertool, p: powertool.Read_Vout(p),
         'READ_IOUT': lambda powertool, p: powertool.Read_Iout(p),
-        'READ_TEMPERATURE_1': lambda powertool, p: powertool.Read_Temp(p),
+        'READ_TEMP': lambda powertool, p: powertool.Read_Temp(p),
+        'READ_DIE_TEMP': lambda powertool, p: powertool.Read_Die_Temp(p),
         'READ_DUTY': lambda powertool, p: powertool.Read_Duty(p),
         'READ_PIN': lambda powertool, p: powertool.Read_PIN(p),
         'READ_POUT': lambda powertool, p: powertool.Read_POUT(p),
         'READ_IIN': lambda powertool, p: powertool.Read_IIN(p),
         'STATUS_BYTE': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_BYTE"]) & 0xFF,
         'STATUS_WORD': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_WORD"]),
+        'READ_STATUS': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_WORD"]),  # Alias for STATUS_WORD
         'STATUS_VOUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_VOUT"]) & 0xFF,
         'STATUS_IOUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_IOUT"]) & 0xFF,
         'STATUS_INPUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_INPUT"]) & 0xFF,
@@ -1406,7 +1655,7 @@ def execute_single_command(rail, command):
         return False
 
     try:
-        print(f"Initializing I2C connection...")
+        print(f"Initializing Serial connection...")
         powertool = PowerToolI2C()
         print(f"Executing {command} on {rail} (Page {page})...")
 
@@ -1422,12 +1671,14 @@ def execute_single_command(rail, command):
             'READ_VOUT': PMBusDict["READ_VOUT"],
             'READ_IOUT': PMBusDict["READ_IOUT"],
             'READ_IIN': PMBusDict["READ_IIN"],
-            'READ_TEMPERATURE_1': PMBusDict["READ_TEMPERATURE_1"],
+            'READ_TEMP': PMBusDict["READ_TEMP"],
+            'READ_DIE_TEMP': PMBusDict["READ_DIE_TEMP"],
             'READ_PIN': PMBusDict["READ_PIN"],
             'READ_POUT': PMBusDict["READ_POUT"],
             'READ_DUTY': PMBusDict["READ_DUTY"],
             'STATUS_BYTE': PMBusDict["STATUS_BYTE"],
             'STATUS_WORD': PMBusDict["STATUS_WORD"],
+            'READ_STATUS': PMBusDict["STATUS_WORD"],  # Alias for STATUS_WORD
             'STATUS_VOUT': PMBusDict["STATUS_VOUT"],
             'STATUS_IOUT': PMBusDict["STATUS_IOUT"],
             'STATUS_INPUT': PMBusDict["STATUS_INPUT"],
@@ -1447,8 +1698,8 @@ def execute_single_command(rail, command):
                 raw_value = powertool.i2c_read16PMBus(page, register_address)
 
         # Format output based on command type with raw value
-        if command.startswith('STATUS'):
-            if command == 'STATUS_WORD':
+        if command.startswith('STATUS') or command == 'READ_STATUS':
+            if command in ['STATUS_WORD', 'READ_STATUS']:
                 print(f"{rail} {command}: 0x{result:04X} (raw: 0x{raw_value:04X})")
             else:
                 print(f"{rail} {command}: 0x{result:02X} (raw: 0x{raw_value:02X})")
@@ -1462,7 +1713,7 @@ def execute_single_command(rail, command):
                 print(f"{rail} {command}: {result:.3f} A (raw: 0x{raw_value:04X})")
             else:
                 print(f"{rail} {command}: {result:.3f} A")
-        elif command in ['READ_TEMPERATURE_1', 'MFR_TEMP_PEAK']:
+        elif command in ['READ_TEMP', 'READ_DIE_TEMP', 'MFR_TEMP_PEAK']:
             if raw_value is not None:
                 print(f"{rail} {command}: {result:.2f} °C (raw: 0x{raw_value:04X})")
             else:
@@ -1494,6 +1745,174 @@ def execute_single_command(rail, command):
         print(f"Error executing {command} on {rail}: {e}")
         return False
 
+def execute_multiple_commands(rail, commands):
+    """Execute multiple PMBus commands on specified rail"""
+
+    # Rail mapping
+    rail_mapping = {
+        'TSP_CORE': 0,  # Rail0 - Page 0
+        'TSP_C2C': 1   # Rail1 - Page 1
+    }
+
+    if rail not in rail_mapping:
+        print(f"Error: Invalid rail '{rail}'. Valid options: TSP_CORE, TSP_C2C")
+        return False
+
+    page = rail_mapping[rail]
+
+    # Command mapping to available methods
+    command_mapping = {
+        'READ_VOUT': lambda powertool, p: powertool.Read_Vout(p),
+        'READ_IOUT': lambda powertool, p: powertool.Read_Iout(p),
+        'READ_TEMP': lambda powertool, p: powertool.Read_Temp(p),
+        'READ_DIE_TEMP': lambda powertool, p: powertool.Read_Die_Temp(p),
+        'READ_DUTY': lambda powertool, p: powertool.Read_Duty(p),
+        'READ_PIN': lambda powertool, p: powertool.Read_PIN(p),
+        'READ_POUT': lambda powertool, p: powertool.Read_POUT(p),
+        'READ_IIN': lambda powertool, p: powertool.Read_IIN(p),
+        'STATUS_BYTE': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_BYTE"]) & 0xFF,
+        'STATUS_WORD': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_WORD"]),
+        'READ_STATUS': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_WORD"]),  # Alias for STATUS_WORD
+        'STATUS_VOUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_VOUT"]) & 0xFF,
+        'STATUS_IOUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_IOUT"]) & 0xFF,
+        'STATUS_INPUT': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_INPUT"]) & 0xFF,
+        'STATUS_TEMPERATURE': lambda powertool, p: powertool.i2c_read16PMBus(p, PMBusDict["STATUS_TEMPERATURE"]) & 0xFF,
+        'VOUT_MODE': lambda powertool, p: powertool.Read_VOUT_MODE(p),
+        'MFR_IOUT_PEAK': lambda powertool, p: powertool.Read_IOUT_Peak(p),
+        'MFR_TEMP_PEAK': lambda powertool, p: powertool.Read_Peak_Temp(p)
+    }
+
+    # Register mapping for raw value display
+    register_mapping = {
+        'READ_VOUT': PMBusDict["READ_VOUT"],
+        'READ_IOUT': PMBusDict["READ_IOUT"],
+        'READ_IIN': PMBusDict["READ_IIN"],
+        'READ_TEMP': PMBusDict["READ_TEMP"],
+        'READ_DIE_TEMP': PMBusDict["READ_DIE_TEMP"],
+        'READ_PIN': PMBusDict["READ_PIN"],
+        'READ_POUT': PMBusDict["READ_POUT"],
+        'READ_DUTY': PMBusDict["READ_DUTY"],
+        'STATUS_BYTE': PMBusDict["STATUS_BYTE"],
+        'STATUS_WORD': PMBusDict["STATUS_WORD"],
+        'READ_STATUS': PMBusDict["STATUS_WORD"],  # Alias for STATUS_WORD
+        'STATUS_VOUT': PMBusDict["STATUS_VOUT"],
+        'STATUS_IOUT': PMBusDict["STATUS_IOUT"],
+        'STATUS_INPUT': PMBusDict["STATUS_INPUT"],
+        'STATUS_TEMPERATURE': PMBusDict["STATUS_TEMPERATURE"],
+        'VOUT_MODE': PMBusDict["VOUT_MODE"],
+        'MFR_IOUT_PEAK': PMBusDict["MFR_IOUT_PEAK"],
+        'MFR_TEMP_PEAK': PMBusDict["MFR_TEMP_PEAK"]
+    }
+
+    # Validate all commands first
+    invalid_commands = [cmd for cmd in commands if cmd not in command_mapping]
+    if invalid_commands:
+        print(f"Error: Invalid command(s): {', '.join(invalid_commands)}")
+        print("Available commands:")
+        for cmd in sorted(command_mapping.keys()):
+            print(f"  - {cmd}")
+        return False
+
+    try:
+        print(f"Initializing Serial connection...")
+        powertool = PowerToolI2C()
+        print(f"Executing {len(commands)} commands on {rail} (Page {page})...")
+        print("=" * 70)
+
+        # Execute all commands
+        results = {}
+        for command in commands:
+            try:
+                # Get the calculated result
+                result = command_mapping[command](powertool, page)
+
+                # Also read the raw register value for display
+                raw_value = None
+                if command in register_mapping:
+                    register_address = register_mapping[command]
+                    if command in ['STATUS_BYTE', 'VOUT_MODE']:
+                        # 8-bit registers
+                        raw_value = powertool.i2c_read8PMBus(page, register_address)
+                    else:
+                        # 16-bit registers
+                        raw_value = powertool.i2c_read16PMBus(page, register_address)
+
+                results[command] = {'value': result, 'raw': raw_value}
+
+            except Exception as e:
+                print(f"  {command}: ERROR - {e}")
+                results[command] = {'value': None, 'raw': None, 'error': str(e)}
+
+        # Display all results in a formatted table
+        print(f"\n{rail} Telemetry Results:")
+        print("-" * 70)
+
+        for command in commands:
+            if command not in results:
+                continue
+
+            if 'error' in results[command]:
+                print(f"  {command:20s}: ERROR - {results[command]['error']}")
+                continue
+
+            result = results[command]['value']
+            raw_value = results[command]['raw']
+
+            # Format output based on command type
+            if command.startswith('STATUS') or command == 'READ_STATUS':
+                if command in ['STATUS_WORD', 'READ_STATUS']:
+                    if raw_value is not None:
+                        print(f"  {command:20s}: 0x{result:04X} (raw: 0x{raw_value:04X})")
+                    else:
+                        print(f"  {command:20s}: 0x{result:04X}")
+                else:
+                    if raw_value is not None:
+                        print(f"  {command:20s}: 0x{result:02X} (raw: 0x{raw_value:02X})")
+                    else:
+                        print(f"  {command:20s}: 0x{result:02X}")
+            elif command == 'READ_VOUT':
+                if raw_value is not None:
+                    print(f"  {command:20s}: {result:.6f} V (raw: 0x{raw_value:04X})")
+                else:
+                    print(f"  {command:20s}: {result:.6f} V")
+            elif command in ['READ_IOUT', 'READ_IIN', 'MFR_IOUT_PEAK']:
+                if raw_value is not None:
+                    print(f"  {command:20s}: {result:.3f} A (raw: 0x{raw_value:04X})")
+                else:
+                    print(f"  {command:20s}: {result:.3f} A")
+            elif command in ['READ_TEMP', 'READ_DIE_TEMP', 'MFR_TEMP_PEAK']:
+                if raw_value is not None:
+                    print(f"  {command:20s}: {result:.2f} °C (raw: 0x{raw_value:04X})")
+                else:
+                    print(f"  {command:20s}: {result:.2f} °C")
+            elif command in ['READ_PIN', 'READ_POUT']:
+                if raw_value is not None:
+                    print(f"  {command:20s}: {result:.3f} W (raw: 0x{raw_value:04X})")
+                else:
+                    print(f"  {command:20s}: {result:.3f} W")
+            elif command == 'READ_DUTY':
+                if raw_value is not None:
+                    print(f"  {command:20s}: {result:.2f} % (raw: 0x{raw_value:04X})")
+                else:
+                    print(f"  {command:20s}: {result:.2f} %")
+            elif command == 'VOUT_MODE':
+                if raw_value is not None:
+                    print(f"  {command:20s}: {result} (exponent) (raw: 0x{raw_value:02X})")
+                else:
+                    print(f"  {command:20s}: {result} (exponent)")
+            else:
+                if raw_value is not None:
+                    print(f"  {command:20s}: {result} (raw: 0x{raw_value:04X})")
+                else:
+                    print(f"  {command:20s}: {result}")
+
+        print("=" * 70)
+        return True
+
+    except Exception as e:
+        print(f"Error executing commands on {rail}: {e}")
+        return False
+
 def execute_vout_command(rail, voltage):
     """Execute VOUT_COMMAND to set voltage on specified rail"""
 
@@ -1515,7 +1934,7 @@ def execute_vout_command(rail, voltage):
         return False
 
     try:
-        print(f"Initializing I2C connection...")
+        print(f"Initializing Serial connection...")
         powertool = PowerToolI2C()
         print(f"Setting voltage on {rail} (Page {page}) to {voltage}V...")
 
@@ -1567,10 +1986,8 @@ def continuous_register_logging(page, hex_addr, addr_desc, byte_count):
         cmd_name = addr_desc.split(' (')[0]  # Extract command name before hex
     else:
         cmd_name = f"0x{hex_addr:02X}"
-    csv_filename = f"data/PAGE{page}_{cmd_name}_{timestamp}.csv"
-
-    # Ensure data directory exists
-    os.makedirs('data', exist_ok=True)
+    # Use global DATA_DIR (already created at startup)
+    csv_filename = os.path.join(DATA_DIR, f"PAGE{page}_{cmd_name}_{timestamp}.csv")
 
     try:
         with open(csv_filename, 'w', newline='') as csvfile:
@@ -1679,9 +2096,21 @@ Examples:
     ./powertool.py TSP_CORE VOUT_COMMAND 0.8       # Set TSP_CORE voltage to 0.8V
     ./powertool.py TSP_C2C VOUT_COMMAND 0.75       # Set TSP_C2C voltage to 0.75V
 
+  Multiple Commands:
+    ./powertool.py TSP_CORE READ_VOUT READ_IOUT READ_TEMP READ_DIE_TEMP
+    ./powertool.py TSP_CORE READ_VOUT READ_IOUT READ_STATUS
+    ./powertool.py TSP_C2C READ_VOUT READ_IOUT STATUS_WORD
+
+  Multiple Commands with Logging:
+    ./powertool.py TSP_CORE READ_VOUT READ_IOUT READ_TEMP READ_DIE_TEMP log
+    ./powertool.py TSP_CORE READ_VOUT READ_IOUT READ_STATUS log 0.5m    # Log for 30 seconds
+    ./powertool.py TSP_C2C READ_VOUT READ_IOUT READ_TEMP log 100        # Log 100 samples
+
   Continuous Logging:
-    ./powertool.py TSP_CORE READ_VOUT log          # Continuously log voltage to CSV
-    ./powertool.py TSP_C2C READ_IOUT log           # Continuously log current to CSV
+    ./powertool.py TSP_CORE READ_VOUT log          # Log voltage to CSV (default: 2 minutes)
+    ./powertool.py TSP_C2C READ_IOUT log 100       # Log 100 samples of current
+    ./powertool.py TSP_CORE READ_VOUT log 5m       # Log voltage for 5 minutes
+    ./powertool.py TSP_C2C READ_IOUT log 0.5m      # Log current for 30 seconds
     ./powertool.py log                             # Log all rails continuously
 
   Direct Hex Register Access (New):
@@ -1704,13 +2133,26 @@ Examples:
     ./powertool.py test                            # Run single readback test
 
 Available Rails: TSP_CORE, TSP_C2C
-Available Commands: READ_VOUT, READ_IOUT, READ_TEMPERATURE_1, READ_DUTY, READ_PIN,
-                   READ_POUT, READ_IIN, STATUS_BYTE, STATUS_WORD, STATUS_VOUT,
-                   STATUS_IOUT, STATUS_INPUT, STATUS_TEMPERATURE, VOUT_MODE,
-                   MFR_IOUT_PEAK, MFR_TEMP_PEAK, VOUT_COMMAND
 
-Note: Add "log" as third argument to continuously log any command to CSV file
-      For VOUT_COMMAND, use voltage value as third argument (e.g., 0.8 for 0.8V)
+Available Commands:
+  Telemetry: READ_VOUT, READ_IOUT, READ_TEMP, READ_DIE_TEMP, READ_DUTY,
+             READ_PIN, READ_POUT, READ_IIN
+  Status:    STATUS_BYTE, STATUS_WORD, READ_STATUS (alias for STATUS_WORD),
+             STATUS_VOUT, STATUS_IOUT, STATUS_INPUT, STATUS_TEMPERATURE
+  Config:    VOUT_MODE, VOUT_COMMAND
+  MFR:       MFR_IOUT_PEAK, MFR_TEMP_PEAK
+
+Multi-Command Features:
+  - Execute multiple commands in one call: TSP_CORE READ_VOUT READ_IOUT READ_TEMP
+  - Add "log" keyword to log multiple commands to CSV simultaneously
+  - CSV format: timestamp, sample_num, command1_value, command2_value, ...
+  - Note: Serial I2C overhead is ~700-800ms per register read
+          Multi-command logging achieves ~0.2-0.3 samples/sec
+
+Single Command Logging:
+  - Add "log" after command to continuously log to CSV file
+  - Optional duration: sample count (e.g., 100) or time (e.g., 5m for 5 minutes)
+  - For VOUT_COMMAND, use voltage value as third argument (e.g., 0.8 for 0.8V)
         """
     )
 
@@ -1722,11 +2164,13 @@ Note: Add "log" as third argument to continuously log any command to CSV file
     parser.add_argument('log_mode', nargs='?',
                        help='Optional: "log" for logging, voltage for VOUT_COMMAND, or hex address for direct read (e.g., 0x62)')
     parser.add_argument('extra_arg', nargs='?',
-                       help='Optional: "READ" for hex read mode, or byte count (1 or 2)')
+                       help='Optional: For log mode: sample count (e.g., 100) or duration (e.g., 5m); For hex read: "READ" or byte count')
     parser.add_argument('byte_count', nargs='?',
                        help='Optional: Number of bytes to read (1 or 2) for hex address mode, or value for WRITE mode')
     parser.add_argument('write_bytes', nargs='?',
                        help='Optional: Number of bytes for WRITE mode (1 or 2)')
+    parser.add_argument('additional_commands', nargs='*',
+                       help='Additional PMBus commands for multi-command execution')
 
     # Parse arguments
     args = parser.parse_args()
@@ -2014,7 +2458,7 @@ Note: Add "log" as third argument to continuously log any command to CSV file
     if args.rail == "log":
         # Continuous logging mode
         try:
-            print("Initializing I2C connection...")
+            print("Initializing Serial connection...")
             powertool = PowerToolI2C()
             print("I2C connection successful")
             print()
@@ -2026,7 +2470,7 @@ Note: Add "log" as third argument to continuously log any command to CSV file
 
         except Exception as e:
             print(f"Error: {e}")
-            print("Note: This script requires an Aardvark I2C adapter to be connected.")
+            print("Note: This script requires a serial I2C connection to the target device.")
         return
 
     elif args.rail == "test" or (args.rail is None and args.command is None):
@@ -2105,14 +2549,79 @@ Note: Add "log" as third argument to continuously log any command to CSV file
 
         except Exception as e:
             print(f"Error: {e}")
-            print("Note: This script requires an Aardvark I2C adapter to be connected.")
+            print("Note: This script requires a serial I2C connection to the target device.")
             print("Make sure the target device is powered and connected to address 0x5C")
         return
 
-    # Handle single command execution (with optional continuous logging or voltage setting)
+    # Handle multiple command execution
     if args.rail and args.command:
         rail = args.rail.upper()
         command = args.command.upper()
+
+        # Check if we have multiple commands
+        # Multiple commands can be: TSP_CORE READ_VOUT READ_IOUT READ_TEMP
+        # In this case: command=READ_VOUT, log_mode=READ_IOUT, extra_arg=READ_TEMP, etc.
+        # OR: TSP_CORE READ_VOUT READ_IOUT (if additional_commands is populated)
+        commands_list = []
+
+        # Check if this looks like a multi-command invocation
+        # Criteria: log_mode exists and looks like a PMBus command (not "log", not a number/voltage)
+        is_multi_command = False
+
+        # List of known PMBus commands (uppercase)
+        known_commands = [
+            'READ_VOUT', 'READ_IOUT', 'READ_TEMP', 'READ_DIE_TEMP', 'READ_DUTY',
+            'READ_PIN', 'READ_POUT', 'READ_IIN', 'STATUS_BYTE', 'STATUS_WORD',
+            'READ_STATUS', 'STATUS_VOUT', 'STATUS_IOUT', 'STATUS_INPUT',
+            'STATUS_TEMPERATURE', 'VOUT_MODE', 'MFR_IOUT_PEAK', 'MFR_TEMP_PEAK'
+        ]
+
+        # Check if log_mode is a command name (indicating multi-command)
+        is_logging = False
+        duration_minutes = 2  # Default
+        sample_rate_ms = 100  # Default
+
+        if args.log_mode and args.log_mode.upper() in known_commands:
+            is_multi_command = True
+            commands_list = [command, args.log_mode.upper()]
+
+            # Collect additional commands and check for "log" keyword
+            all_args = []
+            if args.extra_arg:
+                all_args.append(args.extra_arg)
+            if args.byte_count:
+                all_args.append(args.byte_count)
+            if args.write_bytes:
+                all_args.append(args.write_bytes)
+            if args.additional_commands:
+                all_args.extend(args.additional_commands)
+
+            # Process all arguments - separate commands from log/duration
+            for arg in all_args:
+                if arg.lower() == 'log':
+                    is_logging = True
+                elif arg.upper() in known_commands:
+                    commands_list.append(arg.upper())
+                elif is_logging:
+                    # After "log", check for duration/sample count
+                    try:
+                        if arg.lower().endswith('m'):
+                            duration_minutes = float(arg[:-1])
+                        elif arg.isdigit():
+                            sample_count = int(arg)
+                            duration_minutes = (sample_count * sample_rate_ms / 1000.0) / 60.0
+                    except ValueError:
+                        pass  # Ignore invalid duration arguments
+
+        # Execute multi-command if detected
+        if is_multi_command:
+            if is_logging:
+                # Multi-command logging mode
+                success = continuous_multi_command_logging(rail, commands_list, duration_minutes, sample_rate_ms)
+            else:
+                # Multi-command read mode
+                success = execute_multiple_commands(rail, commands_list)
+            sys.exit(0 if success else 1)
 
         # Handle VOUT_COMMAND (voltage setting)
         if command == "VOUT_COMMAND":
@@ -2132,7 +2641,28 @@ Note: Add "log" as third argument to continuously log any command to CSV file
         # Check if third argument is "log" for continuous logging
         elif args.log_mode and args.log_mode.lower() == "log":
             # Continuous logging mode for specific command
-            success = continuous_single_command_logging(rail, command)
+            # Parse optional 4th argument for duration or sample count
+            duration_minutes = 2  # Default
+            sample_rate_ms = 100  # Default
+
+            if args.extra_arg:
+                try:
+                    # Check if it's a duration in minutes (e.g., "5m" or "0.5m")
+                    if args.extra_arg.lower().endswith('m'):
+                        duration_minutes = float(args.extra_arg[:-1])
+                        print(f"Using custom duration: {duration_minutes} minutes")
+                    # Check if it's a sample count (integer)
+                    elif args.extra_arg.isdigit():
+                        sample_count = int(args.extra_arg)
+                        # Calculate duration from sample count (assume 100ms per sample)
+                        duration_minutes = (sample_count * sample_rate_ms / 1000.0) / 60.0
+                        print(f"Using custom sample count: {sample_count} samples ({duration_minutes:.2f} minutes)")
+                    else:
+                        print(f"Warning: Invalid duration/sample format '{args.extra_arg}', using default (2m)")
+                except ValueError:
+                    print(f"Warning: Could not parse '{args.extra_arg}', using default (2m)")
+
+            success = continuous_single_command_logging(rail, command, duration_minutes, sample_rate_ms)
             sys.exit(0 if success else 1)
         else:
             # Single command execution
