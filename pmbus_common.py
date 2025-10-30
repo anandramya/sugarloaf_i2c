@@ -198,8 +198,8 @@ class PMBusCommands:
         Returns:
             Exponent as signed integer
         """
-        # Read VOUT_MODE as a byte
-        mode = self.i2c_read16PMBus(page, PMBusDict["VOUT_MODE"]) & 0xFF
+        # Read VOUT_MODE as a byte (VOUT_MODE is a 1-byte register)
+        mode = self.i2c_read8PMBus(page, PMBusDict["VOUT_MODE"])
 
         # Parse and return exponent
         return parse_vout_mode(mode)
@@ -502,6 +502,27 @@ class PMBusCommands:
         self.i2c_write16PMBus(page, PMBusDict["IOUT_OC_FAULT_LIMIT"], limit_raw)
 
         print(f"✓ Set IOUT_OC_FAULT_LIMIT to {limit_amps}A (raw=0x{limit_raw:02X}, scale={iout_scale}, LSB={lsb}A)")
+
+    def Clear_Faults(self, page):
+        """
+        Clear all fault registers for the specified page.
+
+        This is a send-byte command that clears all fault status registers:
+        - STATUS_WORD
+        - STATUS_VOUT
+        - STATUS_IOUT
+        - STATUS_INPUT
+        - STATUS_TEMPERATURE
+        - STATUS_CML
+        - STATUS_MFR_SPECIFIC
+
+        Args:
+            page: PMBus page (0 or 1)
+        """
+        # CLEAR_FAULTS is a send-byte command (command code only, no data)
+        # We write 0 to the register to execute the command
+        self.i2c_write8PMBus(page, PMBusDict["CLEAR_FAULTS"], 0x00)
+        print(f"✓ Cleared all faults for page {page}")
 
 
 # Convenience functions for standalone use

@@ -52,6 +52,7 @@ class PowerToolPCIe(PMBusCommands):
         self.i2c_addr = i2c_addr
         self.bus_num = bus_num
         self.i2c_tool_path = i2c_tool_path
+        self.temp_json_file = "/tmp/i2c_read.json"
 
         # Verify i2c tool exists
         if not os.path.exists(self.i2c_tool_path):
@@ -64,6 +65,28 @@ class PowerToolPCIe(PMBusCommands):
         print(f"  PCIe Device: {self.pcie_device}")
         print(f"  I2C Address: 0x{self.i2c_addr:02X}")
         print(f"  I2C Bus: {self.bus_num}")
+
+    def __enter__(self):
+        """Context manager entry"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - cleanup resources"""
+        self.cleanup()
+        return False
+
+    def __del__(self):
+        """Destructor - cleanup resources"""
+        self.cleanup()
+
+    def cleanup(self):
+        """Clean up temporary files and release resources"""
+        # Remove temporary JSON file if it exists
+        try:
+            if os.path.exists(self.temp_json_file):
+                os.remove(self.temp_json_file)
+        except Exception:
+            pass  # Silently ignore cleanup errors
 
     def _run_i2c_command(self, cmd_args, verbose=False):
         """
@@ -130,14 +153,14 @@ class PowerToolPCIe(PMBusCommands):
             "-l", str(length),
             "--reg-addr-len", str(reg_addr_len),
             "-b", str(self.bus_num),
-            "-j", "/tmp/i2c_read.json"  # Save to JSON for parsing
+            "-j", self.temp_json_file  # Save to JSON for parsing
         ]
 
         output = self._run_i2c_command(cmd_args)
 
         # Parse JSON output
         try:
-            with open("/tmp/i2c_read.json", "r") as f:
+            with open(self.temp_json_file, "r") as f:
                 data = json.load(f)
 
             # Extract value from JSON
@@ -188,6 +211,13 @@ class PowerToolPCIe(PMBusCommands):
             self.i2c_write_bytes(PMBusDict["PAGE"], page, length=1)
             time.sleep(0.01)
 
+        # PMBus uses little-endian byte order, but i2ctool writes in big-endian
+        # For 2-byte writes, we need to byte-swap the value
+        write_value = value
+        if length == 2:
+            # Swap bytes: 0xAABB -> 0xBBAA
+            write_value = ((value & 0xFF) << 8) | ((value >> 8) & 0xFF)
+
         # Build command arguments
         cmd_args = [
             "-d", self.pcie_device,
@@ -195,7 +225,7 @@ class PowerToolPCIe(PMBusCommands):
             "-r", str(reg_addr),
             "-t", "pmbus",
             "-b", str(self.bus_num),
-            "-w", str(value),
+            "-w", str(write_value),
             "--write-len", str(length),
             "--reg-addr-len", str(reg_addr_len)
         ]
@@ -280,6 +310,7 @@ Examples:
     rail_name = None
     commands = []
     enable_log = False
+    use_positional_format = False  # Track if using positional args vs named args
     i2c_addr = args.addr if args.addr is not None else SLAVE_ADDR
     pcie_addr = args.device
 
@@ -320,9 +351,16 @@ Examples:
                 normalized_commands.append('READ_DIE_TEMP')
             elif cmd == 'STATUS' or cmd == 'WORD' or cmd == 'STATUS_WORD':
                 normalized_commands.append('STATUS_WORD')
+            elif cmd == 'STATUS_VOUT':
+                normalized_commands.append('STATUS_VOUT')
+            elif cmd == 'STATUS_IOUT':
+                normalized_commands.append('STATUS_IOUT')
+            elif cmd == 'CLEAR_FAULTS' or cmd == 'CLEAR':
+                normalized_commands.append('CLEAR_FAULTS')
             else:
                 normalized_commands.append(cmd)
         commands = normalized_commands
+        use_positional_format = True
 
     # Use named arguments if provided
     if args.rail:
@@ -337,7 +375,7 @@ Examples:
     elif args.addr is None:
         args.addr = SLAVE_ADDR
 
-    # Initialize tool
+    # Initialize tool with context manager for proper cleanup
     try:
         pt = PowerToolPCIe(
             pcie_device=args.device,
@@ -349,36 +387,50 @@ Examples:
         print(f"Error initializing PCIe I2C tool: {e}", file=sys.stderr)
         return 1
 
+    # Ensure cleanup happens on exit
+    try:
+        return _run_commands(pt, args, rail_name, commands, enable_log, use_positional_format)
+    finally:
+        pt.cleanup()
+
+
+def _run_commands(pt, args, rail_name, commands, enable_log, use_positional_format):
+    """Execute the requested commands and return exit code"""
+    # Get page from rail_name if provided
+    page = None
+    if rail_name:
+        page = 0 if rail_name == "TSP_CORE" else 1
+
     # Test mode
     if args.test:
         print("\n" + "="*60)
         print("PMBus Test Mode - Reading Both Rails")
         print("="*60)
 
-        for rail_name, page in [("TSP_CORE", 0), ("TSP_C2C", 1)]:
-            print(f"\n{rail_name} (Page {page}):")
+        for test_rail_name, test_page in [("TSP_CORE", 0), ("TSP_C2C", 1)]:
+            print(f"\n{test_rail_name} (Page {test_page}):")
             print("-"*60)
 
             try:
-                vout = pt.Read_Vout(page)
+                vout = pt.Read_Vout(test_page)
                 print(f"  VOUT:        {vout:.4f} V")
             except Exception as e:
                 print(f"  VOUT:        Error - {e}")
 
             try:
-                iout = pt.Read_Iout(page)
+                iout = pt.Read_Iout(test_page)
                 print(f"  IOUT:        {iout:.2f} A")
             except Exception as e:
                 print(f"  IOUT:        Error - {e}")
 
             try:
-                temp = pt.Read_Temp(page)
+                temp = pt.Read_Temp(test_page)
                 print(f"  TEMP:        {temp:.1f} °C")
             except Exception as e:
                 print(f"  TEMP:        Error - {e}")
 
             try:
-                status = pt.Read_Status_Word(page)
+                status = pt.Read_Status_Word(test_page)
                 print(f"  STATUS_WORD: 0x{status:04X}")
                 # Decode and show status bits
                 decoded = decode_status_word(status)
@@ -393,11 +445,10 @@ Examples:
         print("✓ Test completed")
         return 0
 
-    # Multi-command mode (positional arguments)
+    # Multi-command mode (positional arguments only)
     # Skip multi-command path for REG_READ/REG_WRITE (they need special --reg-addr handling)
-    if commands and rail_name and commands[0] not in ['REG_READ', 'REG_WRITE']:
-        page = 0 if rail_name == "TSP_CORE" else 1
-
+    # Also skip if using named arguments (--rail/--cmd format) to use old-style command path
+    if use_positional_format and commands and rail_name and commands[0] not in ['REG_READ', 'REG_WRITE']:
         # Logging mode
         if enable_log:
             # Generate CSV filename
@@ -499,15 +550,44 @@ Examples:
                     elif cmd == 'STATUS_WORD':
                         status = pt.Read_Status_Word(page)
                         print(f"  STATUS:   0x{status:04X}")
+                        # Decode and show status bits
+                        decoded = decode_status_word(status)
+                        active_faults = [name for name, info in decoded['bits'].items()
+                                        if info['active'] and name not in ['RESERVED_9', 'RESERVED_10']]
+                        if active_faults:
+                            print(f"    Active faults: {', '.join(active_faults)}")
+                    elif cmd == 'STATUS_VOUT':
+                        status_vout = pt.i2c_read8PMBus(page, PMBusDict["STATUS_VOUT"])
+                        print(f"  STATUS_VOUT: 0x{status_vout:02X}")
+                        # Decode and show active bits
+                        decoded = decode_status_vout(status_vout)
+                        active_faults = [name for name, info in decoded['bits'].items()
+                                        if info['active'] and name != 'RESERVED_0']
+                        if active_faults:
+                            print(f"    Active faults: {', '.join(active_faults)}")
+                    elif cmd == 'STATUS_IOUT':
+                        status_iout = pt.i2c_read8PMBus(page, PMBusDict["STATUS_IOUT"])
+                        print(f"  STATUS_IOUT: 0x{status_iout:02X}")
+                        # Decode and show active bits
+                        decoded = decode_status_iout(status_iout)
+                        active_faults = [name for name, info in decoded['bits'].items()
+                                        if info['active'] and name != 'RESERVED_0']
+                        if active_faults:
+                            print(f"    Active faults: {', '.join(active_faults)}")
+                    elif cmd == 'CLEAR_FAULTS':
+                        pt.Clear_Faults(page)
                 except Exception as e:
                     print(f"  {cmd}: Error - {e}")
 
             return 0
 
     # Old-style command mode (--rail and --cmd) - maintain backward compatibility
-    if args.rail and args.cmd:
-        page = 0 if args.rail == "TSP_CORE" else 1
-        cmd = args.cmd.upper()
+    if not args.rail or not args.cmd:
+        # No rail/cmd specified and not in test mode
+        return 0
+
+    page = 0 if args.rail == "TSP_CORE" else 1
+    cmd = args.cmd.upper()
 
     try:
         # Read commands
@@ -538,6 +618,9 @@ Examples:
         elif cmd == "STATUS_IOUT":
             status_iout = pt.i2c_read8PMBus(page, PMBusDict["STATUS_IOUT"])
             print(format_status_iout(status_iout, show_all=True))
+
+        elif cmd == "CLEAR_FAULTS":
+            pt.Clear_Faults(page)
 
         elif cmd == "IOUT_OC_WARN_LIMIT":
             if args.value is not None:
@@ -618,7 +701,7 @@ Examples:
             print("Supported commands: READ_VOUT, READ_IOUT, READ_TEMP, READ_DIE_TEMP")
             print("                    STATUS_WORD, STATUS_VOUT, STATUS_IOUT")
             print("                    IOUT_OC_FAULT_LIMIT, IOUT_OC_WARN_LIMIT, VOUT_COMMAND")
-            print("                    REG_READ, REG_WRITE")
+            print("                    CLEAR_FAULTS, REG_READ, REG_WRITE")
             return 1
 
     except Exception as e:
