@@ -211,9 +211,9 @@ class PowerToolPCIe(PMBusCommands):
         """Read 16-bit word from PMBus register"""
         return self.i2c_read_bytes(reg_addr, length=2, page=page)
 
-    def i2c_write8PMBus(self, reg_addr, value):
+    def i2c_write8PMBus(self, page, reg_addr, value):
         """Write single byte to PMBus register"""
-        self.i2c_write_bytes(reg_addr, value, length=1)
+        self.i2c_write_bytes(reg_addr, value, length=1, page=page)
 
     def i2c_write16PMBus(self, page, reg_addr, value):
         """Write 16-bit word to PMBus register"""
@@ -258,9 +258,13 @@ Examples:
     parser.add_argument("--rail", choices=["TSP_CORE", "TSP_C2C"],
                        help="PMBus rail to access")
     parser.add_argument("--cmd",
-                       help="PMBus command (e.g., READ_VOUT, READ_IOUT, VOUT_COMMAND)")
+                       help="PMBus command (e.g., READ_VOUT, READ_IOUT, VOUT_COMMAND, REG_READ, REG_WRITE)")
     parser.add_argument("--value", type=float,
                        help="Value for write commands (e.g., voltage setpoint)")
+    parser.add_argument("--reg-addr",
+                       help="Register address in hex (e.g., 0x8B) for REG_READ/REG_WRITE")
+    parser.add_argument("--bytes", type=int, choices=[1, 2], default=2,
+                       help="Number of bytes to read/write (1 or 2, default: 2)")
     parser.add_argument("--test", action="store_true",
                        help="Run test mode - read both rails")
     parser.add_argument("--samples", type=int, default=0,
@@ -390,7 +394,8 @@ Examples:
         return 0
 
     # Multi-command mode (positional arguments)
-    if commands and rail_name:
+    # Skip multi-command path for REG_READ/REG_WRITE (they need special --reg-addr handling)
+    if commands and rail_name and commands[0] not in ['REG_READ', 'REG_WRITE']:
         page = 0 if rail_name == "TSP_CORE" else 1
 
         # Logging mode
@@ -558,6 +563,49 @@ Examples:
                 print(f"  IOUT_SCALE: {iout_scale}")
                 print(f"  LSB: {8 * iout_scale} A")
 
+        # Direct register read
+        elif cmd == "REG_READ":
+            if args.reg_addr is None:
+                print("Error: --reg-addr required for REG_READ", file=sys.stderr)
+                return 1
+            reg_addr = int(args.reg_addr, 16) if args.reg_addr.startswith('0x') else int(args.reg_addr)
+
+            if args.bytes == 1:
+                value = pt.i2c_read8PMBus(page, reg_addr)
+                print(f"Register 0x{reg_addr:02X}: 0x{value:02X} ({value} decimal)")
+            else:  # 2 bytes
+                value = pt.i2c_read16PMBus(page, reg_addr)
+                print(f"Register 0x{reg_addr:02X}: 0x{value:04X} ({value} decimal)")
+                print(f"  Byte[0] (LSB): 0x{value & 0xFF:02X}")
+                print(f"  Byte[1] (MSB): 0x{(value >> 8) & 0xFF:02X}")
+
+        # Direct register write
+        elif cmd == "REG_WRITE":
+            if args.reg_addr is None:
+                print("Error: --reg-addr required for REG_WRITE", file=sys.stderr)
+                return 1
+            if args.value is None:
+                print("Error: --value required for REG_WRITE", file=sys.stderr)
+                return 1
+
+            reg_addr = int(args.reg_addr, 16) if args.reg_addr.startswith('0x') else int(args.reg_addr)
+            write_value = int(args.value)
+
+            if args.bytes == 1:
+                if write_value > 0xFF:
+                    print(f"Error: Value 0x{write_value:X} exceeds 1-byte range (0x00-0xFF)", file=sys.stderr)
+                    return 1
+                pt.i2c_write8PMBus(page, reg_addr, write_value)
+                print(f"✓ Wrote 0x{write_value:02X} to register 0x{reg_addr:02X}")
+            else:  # 2 bytes
+                if write_value > 0xFFFF:
+                    print(f"Error: Value 0x{write_value:X} exceeds 2-byte range (0x0000-0xFFFF)", file=sys.stderr)
+                    return 1
+                pt.i2c_write16PMBus(page, reg_addr, write_value)
+                print(f"✓ Wrote 0x{write_value:04X} to register 0x{reg_addr:02X}")
+                print(f"  Byte[0] (LSB): 0x{write_value & 0xFF:02X}")
+                print(f"  Byte[1] (MSB): 0x{(write_value >> 8) & 0xFF:02X}")
+
         # Write commands
         elif cmd == "VOUT_COMMAND":
             if args.value is None:
@@ -570,6 +618,7 @@ Examples:
             print("Supported commands: READ_VOUT, READ_IOUT, READ_TEMP, READ_DIE_TEMP")
             print("                    STATUS_WORD, STATUS_VOUT, STATUS_IOUT")
             print("                    IOUT_OC_FAULT_LIMIT, IOUT_OC_WARN_LIMIT, VOUT_COMMAND")
+            print("                    REG_READ, REG_WRITE")
             return 1
 
     except Exception as e:
