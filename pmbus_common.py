@@ -34,6 +34,9 @@ PMBusDict = {
     "FREQUENCY_SWITCH": 0x33,
     "VOUT_DROOP": 0x28,
 
+    # Limit Commands
+    "IOUT_OC_WARN_LIMIT": 0x4A,
+
     # MFR Specific Commands
     "MFR_VR_CONFIG": 0x67,
     "MFR_VID_RES_R1": 0x29,
@@ -317,6 +320,94 @@ class PMBusCommands:
         self.i2c_write16PMBus(page, PMBusDict["VOUT_COMMAND"], mantissa)
 
         print(f"✓ Set voltage to {voltage:.4f}V (mantissa=0x{mantissa:04X}, exponent={exponent})")
+
+    def Read_IOUT_Scale(self, page):
+        """
+        Read IOUT_SCALE_BIT_A from MFR_VR_CONFIG register.
+
+        The IOUT_SCALE_BIT_A is in bits [2:0] of MFR_VR_CONFIG (0x67).
+        This scale factor is used for IOUT_OC_WARN_LIMIT calculations.
+
+        Args:
+            page: PMBus page (0 or 1)
+
+        Returns:
+            IOUT_SCALE_BIT_A value (0-7)
+        """
+        mfr_vr_config = self.i2c_read16PMBus(page, PMBusDict["MFR_VR_CONFIG"])
+
+        # Extract IOUT_SCALE_BIT_A from bits [2:0]
+        iout_scale = mfr_vr_config & 0x07
+
+        return iout_scale
+
+    def Read_IOUT_OC_WARN_LIMIT(self, page):
+        """
+        Read IOUT overcurrent warning limit.
+
+        Format: Unsigned binary
+        Bits [15:8]: Reserved (always 0)
+        Bits [7:0]: IOUT_OC_WARN_LIMIT value
+        Scaling: OCP_Warn_Level = 8 * IOUT_SCALE_BIT_A (A)
+        LSB = 8 * IOUT_SCALE_BIT_A
+
+        Args:
+            page: PMBus page (0 or 1)
+
+        Returns:
+            Warning limit in amperes
+        """
+        # Read the register value
+        raw_value = self.i2c_read16PMBus(page, PMBusDict["IOUT_OC_WARN_LIMIT"])
+
+        # Extract the limit value from bits [7:0]
+        limit_raw = raw_value & 0xFF
+
+        # Read IOUT scale factor
+        iout_scale = self.Read_IOUT_Scale(page)
+
+        # Calculate the actual current limit
+        # OCP_Warn_Level = limit_raw * LSB
+        # where LSB = 8 * IOUT_SCALE_BIT_A
+        lsb = 8 * iout_scale
+        warn_limit = limit_raw * lsb
+
+        return warn_limit
+
+    def Write_IOUT_OC_WARN_LIMIT(self, page, limit_amps):
+        """
+        Set IOUT overcurrent warning limit.
+
+        Format: Unsigned binary
+        Bits [15:8]: Reserved (set to 0)
+        Bits [7:0]: IOUT_OC_WARN_LIMIT value
+        Scaling: OCP_Warn_Level = 8 * IOUT_SCALE_BIT_A (A)
+
+        Args:
+            page: PMBus page (0 or 1)
+            limit_amps: Warning limit in amperes
+        """
+        # Read IOUT scale factor
+        iout_scale = self.Read_IOUT_Scale(page)
+
+        # Calculate LSB
+        lsb = 8 * iout_scale
+
+        if lsb == 0:
+            raise ValueError("IOUT_SCALE_BIT_A is 0, cannot calculate limit")
+
+        # Calculate raw value
+        # limit_raw = limit_amps / LSB
+        limit_raw = int(limit_amps / lsb)
+
+        # Ensure it fits in 8 bits
+        if limit_raw > 255:
+            raise ValueError(f"Limit {limit_amps}A exceeds maximum (255 * {lsb}A = {255 * lsb}A)")
+
+        # Write to register (bits [15:8] are reserved and set to 0)
+        self.i2c_write16PMBus(page, PMBusDict["IOUT_OC_WARN_LIMIT"], limit_raw)
+
+        print(f"✓ Set IOUT_OC_WARN_LIMIT to {limit_amps}A (raw=0x{limit_raw:02X}, scale={iout_scale}, LSB={lsb}A)")
 
 
 # Convenience functions for standalone use

@@ -534,6 +534,18 @@ Examples:
             status_iout = pt.i2c_read8PMBus(page, PMBusDict["STATUS_IOUT"])
             print(format_status_iout(status_iout, show_all=True))
 
+        elif cmd == "IOUT_OC_WARN_LIMIT":
+            if args.value is not None:
+                # Write mode
+                pt.Write_IOUT_OC_WARN_LIMIT(page, args.value)
+            else:
+                # Read mode
+                warn_limit = pt.Read_IOUT_OC_WARN_LIMIT(page)
+                iout_scale = pt.Read_IOUT_Scale(page)
+                print(f"IOUT_OC_WARN_LIMIT: {warn_limit:.1f} A")
+                print(f"  IOUT_SCALE: {iout_scale}")
+                print(f"  LSB: {8 * iout_scale} A")
+
         # Write commands
         elif cmd == "VOUT_COMMAND":
             if args.value is None:
@@ -545,7 +557,7 @@ Examples:
             print(f"Error: Unknown command '{cmd}'", file=sys.stderr)
             print("Supported commands: READ_VOUT, READ_IOUT, READ_TEMP, READ_DIE_TEMP")
             print("                    STATUS_WORD, STATUS_VOUT, STATUS_IOUT")
-            print("                    VOUT_COMMAND")
+            print("                    IOUT_OC_WARN_LIMIT, VOUT_COMMAND")
             return 1
 
     except Exception as e:
