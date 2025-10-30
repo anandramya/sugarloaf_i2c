@@ -546,6 +546,18 @@ Examples:
                 print(f"  IOUT_SCALE: {iout_scale}")
                 print(f"  LSB: {8 * iout_scale} A")
 
+        elif cmd == "IOUT_OC_FAULT_LIMIT":
+            if args.value is not None:
+                # Write mode
+                pt.Write_IOUT_OC_FAULT_LIMIT(page, args.value)
+            else:
+                # Read mode
+                fault_limit = pt.Read_IOUT_OC_FAULT_LIMIT(page)
+                iout_scale = pt.Read_IOUT_Scale(page)
+                print(f"IOUT_OC_FAULT_LIMIT: {fault_limit:.1f} A")
+                print(f"  IOUT_SCALE: {iout_scale}")
+                print(f"  LSB: {8 * iout_scale} A")
+
         # Write commands
         elif cmd == "VOUT_COMMAND":
             if args.value is None:
@@ -557,7 +569,7 @@ Examples:
             print(f"Error: Unknown command '{cmd}'", file=sys.stderr)
             print("Supported commands: READ_VOUT, READ_IOUT, READ_TEMP, READ_DIE_TEMP")
             print("                    STATUS_WORD, STATUS_VOUT, STATUS_IOUT")
-            print("                    IOUT_OC_WARN_LIMIT, VOUT_COMMAND")
+            print("                    IOUT_OC_FAULT_LIMIT, IOUT_OC_WARN_LIMIT, VOUT_COMMAND")
             return 1
 
     except Exception as e:
