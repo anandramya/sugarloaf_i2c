@@ -324,21 +324,46 @@ class PMBusCommands:
 
     def Read_IOUT_Scale(self, page):
         """
-        Read IOUT_SCALE_BIT_A from MFR_VR_CONFIG register.
+        Read IOUT_SCALE from MFR_VR_CONFIG register.
 
         The IOUT_SCALE_BIT_A is in bits [2:0] of MFR_VR_CONFIG (0x67).
-        This scale factor is used for IOUT_OC_WARN_LIMIT calculations.
+        This is a 3-bit code that maps to the actual scale factor:
+
+        IOUT_SCALE_BIT[2:0] | IOUT_SCALE (A/LSB)
+        --------------------|-------------------
+        3'b000 (0)          | 1 A/LSB (Reserved)
+        3'b001 (1)          | 1/32 A/LSB = 0.03125
+        3'b010 (2)          | 1/16 A/LSB = 0.0625
+        3'b011 (3)          | 1/8 A/LSB = 0.125
+        3'b100 (4)          | 1/4 A/LSB = 0.25
+        3'b101 (5)          | 1/2 A/LSB = 0.5
+        3'b110 (6)          | 1 A/LSB = 1.0
+        3'b111 (7)          | 2 A/LSB = 2.0
 
         Args:
             page: PMBus page (0 or 1)
 
         Returns:
-            IOUT_SCALE_BIT_A value (0-7)
+            IOUT_SCALE value in A/LSB (float)
         """
         mfr_vr_config = self.i2c_read16PMBus(page, PMBusDict["MFR_VR_CONFIG"])
 
         # Extract IOUT_SCALE_BIT_A from bits [2:0]
-        iout_scale = mfr_vr_config & 0x07
+        iout_scale_bits = mfr_vr_config & 0x07
+
+        # Convert 3-bit code to actual scale value
+        scale_lookup = {
+            0: 1.0,      # 3'b000: 1 A/LSB (Reserved)
+            1: 1/32,     # 3'b001: (1/32) A/LSB = 0.03125
+            2: 1/16,     # 3'b010: (1/16) A/LSB = 0.0625
+            3: 1/8,      # 3'b011: (1/8) A/LSB = 0.125
+            4: 1/4,      # 3'b100: (1/4) A/LSB = 0.25
+            5: 1/2,      # 3'b101: (1/2) A/LSB = 0.5
+            6: 1.0,      # 3'b110: 1 A/LSB
+            7: 2.0,      # 3'b111: 2 A/LSB
+        }
+
+        iout_scale = scale_lookup.get(iout_scale_bits, 1.0)
 
         return iout_scale
 
