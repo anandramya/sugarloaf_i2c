@@ -230,16 +230,26 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s --device c1:00.0 --rail TSP_CORE --cmd READ_VOUT
-  %(prog)s -d c1:00.0 --rail TSP_C2C --cmd READ_IOUT
-  %(prog)s -d c1:00.0 --rail TSP_CORE --cmd VOUT_COMMAND --value 0.8
-  %(prog)s -d c1:00.0 --test
+  # Simple format (like serial tool)
+  %(prog)s 0x5C TSP_CORE VOUT IOUT TEMP DIE_TEMP STATUS_WORD
+  %(prog)s 0x5C TSP_CORE VOUT IOUT TEMP DIE_TEMP STATUS_WORD log
+  %(prog)s 0x5C TSP_C2C VOUT IOUT log
+
+  # Original format
+  %(prog)s --rail TSP_CORE --cmd READ_VOUT
+  %(prog)s --rail TSP_C2C --cmd READ_IOUT
+  %(prog)s --test
         """
     )
 
+    # Positional arguments (optional, for simple command format)
+    parser.add_argument("positional", nargs='*',
+                       help="[I2C_ADDR] RAIL COMMAND1 [COMMAND2 ...] [log]")
+
+    # Optional named arguments
     parser.add_argument("-d", "--device", default=PCIE_DEVICE,
                        help=f"PCIe device address (default: {PCIE_DEVICE})")
-    parser.add_argument("-a", "--addr", type=lambda x: int(x, 0), default=SLAVE_ADDR,
+    parser.add_argument("-a", "--addr", type=lambda x: int(x, 0), default=None,
                        help=f"I2C slave address (default: 0x{SLAVE_ADDR:02X})")
     parser.add_argument("-b", "--bus", type=int, default=I2C_BUS_NUM,
                        help=f"I2C bus number (default: {I2C_BUS_NUM})")
@@ -253,10 +263,75 @@ Examples:
                        help="Value for write commands (e.g., voltage setpoint)")
     parser.add_argument("--test", action="store_true",
                        help="Run test mode - read both rails")
+    parser.add_argument("--samples", type=int, default=0,
+                       help="Number of samples to log (0 = infinite, Ctrl+C to stop)")
+    parser.add_argument("--interval", type=float, default=1.0,
+                       help="Logging interval in seconds (default: 1.0)")
     parser.add_argument("-v", "--verbose", action="store_true",
                        help="Verbose output")
 
     args = parser.parse_args()
+
+    # Parse positional arguments (simple format: [PCIE_ADDR] [I2C_ADDR] RAIL CMD1 [CMD2 ...] [log])
+    rail_name = None
+    commands = []
+    enable_log = False
+    i2c_addr = args.addr if args.addr is not None else SLAVE_ADDR
+    pcie_addr = args.device
+
+    if args.positional:
+        pos_args = args.positional[:]
+
+        # Check if first argument is PCIe address (format: 0000:c1:00.0 or c1:00.0)
+        if pos_args and ':' in pos_args[0]:
+            pcie_addr = pos_args[0]
+            if not pcie_addr.startswith('0000:'):
+                pcie_addr = '0000:' + pcie_addr
+            pos_args = pos_args[1:]
+
+        # Check if next argument is I2C address (starts with 0x)
+        if pos_args and pos_args[0].lower().startswith('0x'):
+            i2c_addr = int(pos_args[0], 16)
+            pos_args = pos_args[1:]
+
+        # Next should be rail name
+        if pos_args and pos_args[0].upper() in ['TSP_CORE', 'TSP_C2C']:
+            rail_name = pos_args[0].upper()
+            pos_args = pos_args[1:]
+
+        # Check if last argument is 'log'
+        if pos_args and pos_args[-1].lower() == 'log':
+            enable_log = True
+            pos_args = pos_args[:-1]
+
+        # Remaining arguments are commands
+        commands = [cmd.upper() for cmd in pos_args]
+
+        # Normalize command names (add READ_ prefix if needed)
+        normalized_commands = []
+        for cmd in commands:
+            if cmd in ['VOUT', 'IOUT', 'TEMP']:
+                normalized_commands.append(f'READ_{cmd}')
+            elif cmd == 'DIE_TEMP':
+                normalized_commands.append('READ_DIE_TEMP')
+            elif cmd == 'STATUS' or cmd == 'WORD' or cmd == 'STATUS_WORD':
+                normalized_commands.append('STATUS_WORD')
+            else:
+                normalized_commands.append(cmd)
+        commands = normalized_commands
+
+    # Use named arguments if provided
+    if args.rail:
+        rail_name = args.rail
+    if args.cmd:
+        commands = [args.cmd.upper()]
+
+    # Update device and addr from positional parsing
+    args.device = pcie_addr
+    if i2c_addr != SLAVE_ADDR:
+        args.addr = i2c_addr
+    elif args.addr is None:
+        args.addr = SLAVE_ADDR
 
     # Initialize tool
     try:
@@ -314,15 +389,120 @@ Examples:
         print("✓ Test completed")
         return 0
 
-    # Command mode
-    if not args.rail or not args.cmd:
-        parser.print_help()
-        print("\nError: --rail and --cmd are required (or use --test)", file=sys.stderr)
-        return 1
+    # Multi-command mode (positional arguments)
+    if commands and rail_name:
+        page = 0 if rail_name == "TSP_CORE" else 1
 
-    # Determine page from rail
-    page = 0 if args.rail == "TSP_CORE" else 1
-    cmd = args.cmd.upper()
+        # Logging mode
+        if enable_log:
+            # Generate CSV filename
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            cmd_names = '_'.join(commands[:3])  # Use first 3 commands in filename
+            if len(commands) > 3:
+                cmd_names += '_etc'
+            csv_file = f"{DATA_DIR}/{rail_name}_{cmd_names}_{timestamp}.csv"
+
+            print(f"\n{'='*70}")
+            print(f"PMBus Logging - {rail_name}")
+            print(f"{'='*70}")
+            print(f"Commands: {', '.join(commands)}")
+            print(f"Samples: {'Infinite (Ctrl+C to stop)' if args.samples == 0 else args.samples}")
+            print(f"Interval: {args.interval}s")
+            print(f"Output: {csv_file}")
+            print(f"{'='*70}\n")
+
+            # Create CSV file with headers
+            with open(csv_file, 'w', newline='') as f:
+                writer = csv.writer(f)
+                headers = ['timestamp', 'sample_num'] + commands
+                writer.writerow(headers)
+
+            sample_num = 0
+            start_time = time.time()
+
+            try:
+                while True:
+                    sample_num += 1
+                    elapsed = time.time() - start_time
+
+                    # Read data
+                    row = [f"{elapsed:.3f}", sample_num]
+
+                    for cmd in commands:
+                        try:
+                            if cmd == 'READ_VOUT':
+                                value = pt.Read_Vout(page)
+                            elif cmd == 'READ_IOUT':
+                                value = pt.Read_Iout(page)
+                            elif cmd == 'READ_TEMP':
+                                value = pt.Read_Temp(page)
+                            elif cmd == 'READ_DIE_TEMP':
+                                value = pt.Read_Die_Temp(page)
+                            elif cmd == 'STATUS_WORD':
+                                value = f"0x{pt.Read_Status_Word(page):04X}"
+                            else:
+                                value = "N/A"
+                            row.append(value)
+                        except Exception as e:
+                            row.append(f"Error: {e}")
+
+                    # Write to CSV
+                    with open(csv_file, 'a', newline='') as f:
+                        writer = csv.writer(f)
+                        writer.writerow(row)
+
+                    # Print progress
+                    values_str = ' | '.join([f"{row[i+2]}" if isinstance(row[i+2], str) else f"{row[i+2]:.4f}"
+                                              for i in range(len(commands))])
+                    print(f"Sample {sample_num:4d} | Time: {elapsed:7.2f}s | {values_str}")
+
+                    # Check if we've reached the sample limit
+                    if args.samples > 0 and sample_num >= args.samples:
+                        break
+
+                    # Wait for next sample
+                    time.sleep(args.interval)
+
+            except KeyboardInterrupt:
+                print(f"\n\n{'='*70}")
+                print(f"Logging stopped by user (Ctrl+C)")
+                print(f"{'='*70}")
+
+            print(f"\nLogged {sample_num} samples to: {csv_file}")
+            print(f"Total time: {time.time() - start_time:.2f}s")
+            return 0
+
+        # Single read mode (no logging)
+        else:
+            print(f"\n{rail_name} (Page {page}):")
+            print("-" * 60)
+
+            for cmd in commands:
+                try:
+                    if cmd == 'READ_VOUT':
+                        vout = pt.Read_Vout(page)
+                        print(f"  VOUT:     {vout:.4f} V")
+                    elif cmd == 'READ_IOUT':
+                        iout = pt.Read_Iout(page)
+                        print(f"  IOUT:     {iout:.2f} A")
+                    elif cmd == 'READ_TEMP':
+                        temp = pt.Read_Temp(page)
+                        print(f"  TEMP:     {temp:.1f} °C")
+                    elif cmd == 'READ_DIE_TEMP':
+                        die_temp = pt.Read_Die_Temp(page)
+                        print(f"  DIE_TEMP: {die_temp:.1f} °C")
+                    elif cmd == 'STATUS_WORD':
+                        status = pt.Read_Status_Word(page)
+                        print(f"  STATUS:   0x{status:04X}")
+                except Exception as e:
+                    print(f"  {cmd}: Error - {e}")
+
+            return 0
+
+    # Old-style command mode (--rail and --cmd) - maintain backward compatibility
+    if args.rail and args.cmd:
+        page = 0 if args.rail == "TSP_CORE" else 1
+        cmd = args.cmd.upper()
 
     try:
         # Read commands
